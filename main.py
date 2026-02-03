@@ -72,15 +72,6 @@ if os.getenv("ADMIN_IDS"):
 if not ADMIN_IDS:
     print("Error: ADMIN_IDS not set in environment variables.")
     exit(1)
-
-if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-
-    # BOT MUST RUN IN MAIN THREAD
-    application = ApplicationBuilder().token(TOKEN).build()
-    application.run_polling()
     
 # فایل دیتابیس
 DB_FILE = "database.json"
@@ -1122,8 +1113,6 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-
 @app.get("/")
 def home():
     return "Bot is running!", 200
@@ -1133,6 +1122,9 @@ def home():
 # --- MAIN ---
 # --- MAIN ---
 if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
     if not TOKEN:
         print("Error: TOKEN not found in environment variables.")
         exit(1)
