@@ -69,6 +69,7 @@ if not ADMIN_IDS:
 # فایل دیتابیس
 DB_FILE = "/tmp/database.json"
 
+
 # --- LOGGING ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -109,12 +110,33 @@ def save_db(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-
-
-
 # فایل بکاپ روزانه
 BACKUP_FILE = "/tmp/backup_database.zip"
 
+# --- USER DB HANDLERS --- #
+
+USER_DB_FILE = "/tmp/users_db.json"
+
+def load_user_db():
+    if not os.path.exists(USER_DB_FILE):
+        data = {
+            "admins": {
+                "secondary": [],
+                "admin_password": None
+            },
+            "users": {}
+        }
+        save_user_db(data)
+        return data
+    try:
+        with open(USER_DB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"admins": {"secondary": [], "admin_password": None}, "users": {}}
+
+def save_user_db(data):
+    with open(USER_DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 
@@ -253,6 +275,23 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     is_admin = (user_id in ADMIN_IDS)
+
+    # ======= ثبت کاربر ==================================================================
+    user_db = load_user_db()
+    uid_str = str(user_id)
+
+    # اگر قبلاً نبوده -> اضافه کن
+    if uid_str not in user_db["users"]:
+        user_db["users"][uid_str] = {
+            "username": update.effective_user.username,
+            "name": update.effective_user.full_name,
+            "messages": 0
+        }
+
+    # افزایش پیام
+    user_db["users"][uid_str]["messages"] += 1
+    save_user_db(user_db)
+    # =====================================================================================
     
     # بازیابی نود فعلی
     current_node_id = context.user_data.get('current_node', 'root')
