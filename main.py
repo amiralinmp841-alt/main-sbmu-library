@@ -1081,20 +1081,7 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
         caption="📦 بکاپ اتوماتیک دیتابیس"
     )
 
-#---health check--------------------------------------------------------
-from flask import Flask
-import threading
 
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "OK", 200
-
-def run_flask():
-    app.run(host="0.0.0.0", port=10000)
-
-threading.Thread(target=run_flask).start()
 # --- MAIN -------------------------------------------------------------
 if __name__ == "__main__":
     if not TOKEN:
@@ -1153,3 +1140,18 @@ if __name__ == "__main__":
         url_path=TOKEN,
         webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
     )
+
+#---health check--------------------------------------------------------
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK", 200
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+threading.Thread(target=run_flask).start()
