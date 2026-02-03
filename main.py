@@ -19,6 +19,7 @@ from flask import Flask
 import threading
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
 
 
 def delete_node_recursive(db, node_id):
@@ -147,6 +148,7 @@ def get_keyboard(node_id, is_admin):
         keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
+        keyboard.append([ADMIN_ACCESSIBILITY_NAME])
 
 
     # دکمه‌های بازگشت
@@ -240,7 +242,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🎄 به ربات دانشگاه خوش آمدید. (V_3.11.21🔥)",
+        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.0🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -268,7 +270,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
 
-    # 1. هندل کردن بازگشت و خانه
+    # 1. هندل کردن بازگشت و خانه------------------------------------------------------------------------------------------------------------------
     if text == "🏠 صفحه اصلی":
         context.user_data['current_node'] = 'root'
         await update.message.reply_text("به صفحه اصلی بازگشتید.", reply_markup=get_keyboard('root', is_admin))
@@ -283,8 +285,226 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['current_node'] = 'root'
             await update.message.reply_text("شما در صفحه اصلی هستید.", reply_markup=get_keyboard('root', is_admin))
         return CHOOSING
+  
+    # ============================================================================================================================
 
-            # 2. هندل کردن دستورات ادمین
+    # 👑 پنل مدیریت
+    if is_admin and text == ADMIN_ACCESSIBILITY_NAME:
+        context.user_data["panel"] = "main_admin_panel"
+        await update.message.reply_text(
+            "🔐 پنل مدیریت باز شد:",
+            reply_markup=ReplyKeyboardMarkup([
+                ["👑 مدیریت ادمین‌ها"],
+                ["📂 مدیریت کاربران"],
+                ["📦 دریافت USER بکاپ"],
+                ["📥 وارد کردن USER بکاپ"],
+                ["🔙 بازگشت"]
+            ], resize_keyboard=True)
+        )
+        return CHOOSING
+    
+    if text == "🔙 بازگشت" and context.user_data.get("panel"):
+        context.user_data.pop("panel", None)
+        context.user_data["current_node"] = "root"
+        await update.message.reply_text(
+            "⏪ به صفحه اصلی برگشتی",
+            reply_markup=get_keyboard("root", True)
+        )
+        return CHOOSING
+
+
+    # 📌 مدیریت ادمین‌ها
+    if context.user_data.get("panel") == "main_admin_panel" and text == "👑 مدیریت ادمین‌ها":
+        context.user_data["panel"] = "manage_admins"
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
+            reply_markup=ReplyKeyboardMarkup([
+                ["➕ افزودن ادمین"],
+                ["➖ حذف ادمین"],
+                ["📋 لیست ادمین‌ها"],
+                ["💬 چت با ادمین‌ها"],
+                ["🔑 تنظیم رمز ادمینی"],
+                ["🔙 بازگشت"]
+            ], resize_keyboard=True)
+        )
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "manage_admins" and text == "➕ افزودن ادمین":
+        context.user_data["panel"] = "add_admin"
+        await update.message.reply_text(
+            "📥 آیدی عددی یا یوزرنیم ادمین را وارد کن:",
+            reply_markup=ReplyKeyboardMarkup([["🔙 بازگشت"]], resize_keyboard=True)
+        )
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "add_admin":
+        if text == "🔙 بازگشت":
+            context.user_data["panel"] = "manage_admins"
+            return await handle_navigation(update, context)
+    
+        # اضافه کردن ادمین
+        user_db = load_user_db()
+        tgt = text.strip()
+    
+        # تشخیص عدد یا متن
+        if tgt.isdigit():
+            val = int(tgt)
+        else:
+            val = tgt
+    
+        # اگر محیطی هست
+        if val in ADMIN_IDS:
+            await update.message.reply_text("⚠️ از قبل ادمین اصلی هست.")
+            return CHOOSING
+    
+        # اگر از قبل secondary هست
+        if val in user_db["admins"]["secondary"]:
+            await update.message.reply_text("⚠️ قبلاً اضافه شده.")
+            return CHOOSING
+    
+        # اضافه می‌کنیم
+        user_db["admins"]["secondary"].append(val)
+        save_user_db(user_db)
+    
+        await update.message.reply_text("👌 ادمین فرعی اضافه شد.")
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "manage_admins" and text == "➖ حذف ادمین":
+        context.user_data["panel"] = "remove_admin"
+        await update.message.reply_text(
+            "📤 آیدی عددی یا یوزرنیم ادمین را بفرست:",
+            reply_markup=ReplyKeyboardMarkup([["🔙 بازگشت"]], resize_keyboard=True)
+        )
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "remove_admin":
+        if text == "🔙 بازگشت":
+            context.user_data["panel"] = "manage_admins"
+            return await handle_navigation(update, context)
+    
+        user_db = load_user_db()
+        tgt = text.strip()
+    
+        if tgt.isdigit():
+            val = int(tgt)
+        else:
+            val = tgt
+    
+        # محیطی حذف نمیشه
+        if val in ADMIN_IDS:
+            await update.message.reply_text("❌ ادمین اصلی حذف نمی‌شود.")
+            return CHOOSING
+    
+        if val not in user_db["admins"]["secondary"]:
+            await update.message.reply_text("❌ این ادمین نیست.")
+            return CHOOSING
+    
+        user_db["admins"]["secondary"].remove(val)
+        save_user_db(user_db)
+    
+        await update.message.reply_text("🗑 ادمین فرعی حذف شد.")
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "manage_admins" and text == "📋 لیست ادمین‌ها":
+        user_db = load_user_db()
+        
+        msg = "👑 ادمین‌های اصلی:\n"
+        for ad in ADMIN_IDS:
+            msg += f"• `{ad}`\n"
+    
+        msg += "\n🧩 ادمین‌های فرعی:\n"
+        if user_db["admins"]["secondary"]:
+            for ad in user_db["admins"]["secondary"]:
+                msg += f"• `{ad}`\n"
+        else:
+            msg += "– هیچ ادمین فرعی –"
+    
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "manage_admins" and text == "🔑 تنظیم رمز ادمینی":
+        user_db = load_user_db()
+    
+        pwd = user_db["admins"].get("admin_password") or "تعریف نشده"
+    
+        await update.message.reply_text(
+            f"🔐 رمز فعلی:\n`{pwd}`",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([
+                ["✏️ ویرایش رمز"],
+                ["🔙 بازگشت"]
+            ], resize_keyboard=True)
+        )
+        context.user_data["panel"] = "edit_admin_pwd"
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "edit_admin_pwd" and text == "✏️ ویرایش رمز":
+        await update.message.reply_text(
+            "📩 رمز جدید را وارد کن:",
+            reply_markup=ReplyKeyboardMarkup([["🔙 بازگشت"]], resize_keyboard=True)
+        )
+        context.user_data["panel"] = "set_new_admin_pwd"
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "set_new_admin_pwd":
+        if text == "🔙 بازگشت":
+            context.user_data["panel"] = "manage_admins"
+            return await handle_navigation(update, context)
+    
+        user_db = load_user_db()
+        user_db["admins"]["admin_password"] = text.strip()
+        save_user_db(user_db)
+    
+        await update.message.reply_text("✅ رمز ادمینی ذخیره شد.")
+        return CHOOSING
+    
+
+    if context.user_data.get("panel") == "main_admin_panel" and text == "📦 دریافت USER بکاپ":
+        user_db = load_user_db()
+    
+        mem = io.BytesIO()
+        mem.write(json.dumps(user_db, ensure_ascii=False, indent=2).encode())
+        mem.seek(0)
+    
+        await update.message.reply_document(
+            document=InputFile(mem, filename=f"user_backup_{datetime.now().strftime('%Y%m%d')}.json")
+        )
+        return CHOOSING
+
+
+    if context.user_data.get("panel") == "main_admin_panel" and text == "📥 وارد کردن USER بکاپ":
+        await update.message.reply_text(
+            "📤 فایل user_backup.json را ارسال کن:",
+            reply_markup=ReplyKeyboardMarkup([["🔙 بازگشت"]], resize_keyboard=True)
+        )
+        context.user_data["panel"] = "waiting_user_backup"
+        return CHOOSING
+    
+    
+    if context.user_data.get("panel") == "waiting_user_backup" and update.message.document:
+        doc = update.message.document
+        b = await doc.get_file()
+        ba = await b.download_as_bytearray()
+    
+        try:
+            data = json.loads(ba.decode())
+            save_user_db(data)
+            await update.message.reply_text("✅ بکاپ کاربران وارد شد.")
+        except:
+            await update.message.reply_text("❌ فایل نامعتبر است.")
+    
+        return CHOOSING
+    
+    # ============================================================================================================================
+    # 2. هندل کردن دستورات ادمین-------------------------------------------------------------------------------------------------------------------
     if is_admin:
         if text == "➕ افزودن دکمه":
             await update.message.reply_text("نام دکمه جدید را بنویسید:", reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True))
@@ -442,10 +662,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="MarkdownV2"
                     )
                     return CHOOSING
-        
-        
-                    
-        
 
 
         if text == "🔀 جابه‌جایی چیدمان":
@@ -553,13 +769,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return CHOOSING
         
 
-
-
-
-
-
-
-
+#================================================================================================================
     # 3. هندل کردن ناوبری (کلیک روی دکمه‌های پوشه)
     # چک کنیم آیا تکست کاربر نام یکی از دکمه‌های زیرمجموعه است؟
     children = db[current_node_id].get("children", [])
