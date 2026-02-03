@@ -35,11 +35,6 @@ if not ADMIN_IDS:
     print("Error: ADMIN_IDS not set in environment variables.")
     exit(1)
 #==========================================================================
-@app.get("/")
-def home():
-    return "Bot is running!", 200
-
-
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
@@ -1122,7 +1117,7 @@ def home():
     return "Bot is running!", 200
 
 
-# --- MAIN ---
+# --- MAIN -------------------------------------------------------------
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: TOKEN not found in environment variables.")
