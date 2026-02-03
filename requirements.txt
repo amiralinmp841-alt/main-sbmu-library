@@ -1,5 +1,6 @@
-python-telegram-bot[webhooks]==20.7
+python-telegram-bot[webhooks,job-queue]==20.7
 flask
 waitress
+
 
 
