@@ -267,7 +267,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.2🔥)",
+        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.3🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -295,16 +295,22 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_db["users"][uid_str]["messages"] += 1
     save_user_db(user_db)
     # =====================================================================================
+    # --- رمز ادمین شدن ------
+    # اگر کاربر رمز ارسال کرد
     user_db = load_user_db()
-    pwd = user_db["admins"].get("admin_password")
-    if pwd and text == pwd:
-        # تبدیل به ادمین فرعی
-        uid_str = str(update.effective_user.id)
-        if uid_str not in user_db["admins"]["secondary"]:
-            user_db["admins"]["secondary"].append(uid_str)
+    admin_password = user_db["admins"]["admin_password"]
+    
+    if text == admin_password:
+        uid = str(update.effective_user.id)
+    
+        # اگر قبلاً ادمین نبوده، اضافه کن
+        if uid not in user_db["admins"]["secondary"]:
+            user_db["admins"]["secondary"].append(uid)
             save_user_db(user_db)
     
-        await update.message.reply_text("✅ رمز تایید شد! شما اکنون ادمین هستید.")
+        is_admin = True   # ←←← این خط دقیقاً همینجا باید باشد (4 تا فاصله جلو)
+    
+        await update.message.reply_text("✅ رمز تایید شد. شما اکنون ادمین هستید.😎")
         return CHOOSING
     # =====================================================================================
 
