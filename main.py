@@ -260,7 +260,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.1.4🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.1.5🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -400,7 +400,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_ADMIN_PASSWORD_EDIT
     if is_admin and text == "📤 دریافت userdata":
-        import zipfile, io, json
     
         userdata = load_userdata()
     
