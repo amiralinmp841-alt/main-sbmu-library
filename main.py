@@ -86,7 +86,8 @@ logging.basicConfig(
     WAITING_RESTORE_FILE,
     WAITING_RENAME_BUTTON,
     WAITING_ADMIN_PASSWORD_EDIT
-) = range(6)
+    WAITING_USERDATA_UPLOAD,
+) = range(7)
 
 
 # --- DATABASE HANDLERS ---
@@ -118,7 +119,7 @@ def save_db(data):
 
 # فایل بکاپ روزانه
 BACKUP_FILE = "/tmp/backup_database.zip"
-# --- user data --- --- --- --- --- --- --- --- ---
+# --- user data --- --- --- --- --- --- --- --- --- -----------------------------------------------
 def load_userdata():
     if not os.path.exists("userdata.json"):
         return {}
@@ -131,7 +132,7 @@ def save_userdata(data):
 
 userdata = load_userdata()
 
-# --- KEYBOARD BUILDERS ---
+# --- KEYBOARD BUILDERS --- ------------------------------------------------------------------------
 def get_keyboard(node_id, is_admin):
     db = load_db()
     node = db.get(node_id)
@@ -258,7 +259,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.6🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.0.7🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -272,7 +273,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
-    # --- Check Admin Password ---
+    # --- Check Admin Password --- ----------------------------------------------------------
     admin_pass = userdata.get("admin_password")
     if admin_pass and text == admin_pass:
         if user_id not in ADMIN_IDS and user_id not in userdata.get("sub_admins", []):
@@ -326,7 +327,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     # --- 2. هندل کردن دستورات ادمین ---
-    # --- Admin panel back handling ---
+    # --- Admin panel back handling -----------------------------------------
     if text == "🔙 بازگشت" and context.user_data.get("admin_panel"):
         panel = context.user_data["admin_panel"]
     
@@ -336,6 +337,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🔐 پنل مدیریت:",
                 reply_markup=ReplyKeyboardMarkup([
                     ["مدیریت ادمین‌ها"],
+                    ["📤 دریافت userdata"],
+                    ["📥 وارد کردن userdata"],
                     ["🔙 بازگشت"]
                 ], resize_keyboard=True)
             )
@@ -356,6 +359,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔐 پنل مدیریت:",
             reply_markup=ReplyKeyboardMarkup([
                 ["مدیریت ادمین‌ها"],
+                ["📤 دریافت userdata"],
+                ["📥 وارد کردن userdata"],
                 ["🔙 بازگشت"]
             ], resize_keyboard=True)
         )
@@ -391,6 +396,35 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
         )
         return WAITING_ADMIN_PASSWORD_EDIT
+    if is_admin and text == "📤 دریافت userdata":
+        import zipfile, io, json
+    
+        userdata = load_userdata()
+    
+        json_bytes = json.dumps(userdata, ensure_ascii=False, indent=2).encode("utf-8")
+    
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+            zipf.writestr("userdata.json", json_bytes)
+    
+        zip_buffer.seek(0)
+    
+        await update.message.reply_document(
+            document=zip_buffer,
+            filename=".userdata.zip",
+            caption="📦 بکاپ userdata"
+        )
+    
+        return CHOOSING
+
+    if is_admin and text == "📥 وارد کردن userdata":
+        await update.message.reply_text(
+            "📥 فایل .userdata.zip را ارسال کنید",
+            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
+        )
+        return WAITING_USERDATA_UPLOAD
+    
+    
     
     #==============================================================================
             
@@ -664,11 +698,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-
-
-
-
     # 3. هندل کردن ناوبری (کلیک روی دکمه‌های پوشه)
     # چک کنیم آیا تکست کاربر نام یکی از دکمه‌های زیرمجموعه است؟
     children = db[current_node_id].get("children", [])
@@ -750,8 +779,40 @@ async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return CHOOSING
 
+async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import zipfile, io, json, os
 
+    doc = update.message.document
+    if not doc or not doc.file_name.endswith(".zip"):
+        await update.message.reply_text("❌ فایل ZIP معتبر نیست")
+        return WAITING_USERDATA_UPLOAD
 
+    file = await doc.get_file()
+    file_bytes = await file.download_as_bytearray()
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zipf:
+            if "userdata.json" not in zipf.namelist():
+                await update.message.reply_text("❌ userdata.json داخل فایل نیست")
+                return WAITING_USERDATA_UPLOAD
+
+            userdata = json.loads(zipf.read("userdata.json").decode("utf-8"))
+
+        save_userdata(userdata)
+
+        await update.message.reply_text(
+            "✅ userdata با موفقیت بازیابی شد",
+            reply_markup=get_keyboard("admin_mgmt", True)
+        )
+
+        context.user_data["current_node"] = "admin_mgmt"
+        return CHOOSING
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در بازیابی:\n{e}")
+        return WAITING_USERDATA_UPLOAD
+
+#=======================================================================
 def is_valid_node_id(text, db):
     return text in db and isinstance(db[text], dict)
 
@@ -1025,7 +1086,10 @@ if __name__ == "__main__":
             ],
             WAITING_ADMIN_PASSWORD_EDIT: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), set_admin_password)
-            ]
+            ],
+            WAITING_USERDATA_UPLOAD: [
+                MessageHandler(filters.Document.ALL, restore_userdata)
+            ],
             
         },
         fallbacks=[CommandHandler('start', start)]
