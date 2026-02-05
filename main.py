@@ -118,9 +118,18 @@ def save_db(data):
 
 # فایل بکاپ روزانه
 BACKUP_FILE = "/tmp/backup_database.zip"
+# --- user data --- --- --- --- --- --- --- --- ---
+def load_userdata():
+    if not os.path.exists("userdata.json"):
+        return {}
+    with open("userdata.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
+def save_userdata(data):
+    with open("userdata.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-
+userdata = load_userdata()
 
 # --- KEYBOARD BUILDERS ---
 def get_keyboard(node_id, is_admin):
@@ -217,8 +226,9 @@ async def not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    db = load_db()
-    sub_admins = db.get("sub_admins", [])
+    userdata = load_userdata()
+    sub_admins = userdata.get("sub_admins", [])
+    
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     # پاک‌سازی کامل وضعیت قبلی
@@ -248,7 +258,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.4🔥)",
+        "🎄 به ربات دانشگاه خوش آمدید. (V_4.0.6🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -258,16 +268,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
-    db = load_db()
-    sub_admins = db.get("sub_admins", [])
+    userdata = load_userdata()
+    sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     # --- Check Admin Password ---
-    admin_pass = db.get("admin_password")
+    admin_pass = userdata.get("admin_password")
     if admin_pass and text == admin_pass:
-        if user_id not in ADMIN_IDS and user_id not in db.get("sub_admins", []):
-            db.setdefault("sub_admins", []).append(user_id)
-            save_db(db)
+        if user_id not in ADMIN_IDS and user_id not in userdata.get("sub_admins", []):
+            userdata.setdefault("sub_admins", []).append(user_id)
+            save_userdata(userdata)
     
             await update.message.reply_text("✅ رمز تایید شد.\nشما اکنون ادمین هستید 😎")
     
@@ -316,9 +326,32 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     # --- 2. هندل کردن دستورات ادمین ---
-
+    # --- Admin panel back handling ---
+    if text == "🔙 بازگشت" and context.user_data.get("admin_panel"):
+        panel = context.user_data["admin_panel"]
+    
+        if panel == "admin_mgmt":
+            context.user_data["admin_panel"] = "access"
+            await update.message.reply_text(
+                "🔐 پنل مدیریت:",
+                reply_markup=ReplyKeyboardMarkup([
+                    ["مدیریت ادمین‌ها"],
+                    ["🔙 بازگشت"]
+                ], resize_keyboard=True)
+            )
+            return CHOOSING
+    
+        if panel == "access":
+            context.user_data.pop("admin_panel")
+            await update.message.reply_text(
+                "بازگشت به صفحه اصلی",
+                reply_markup=get_keyboard("root", is_admin)
+            )
+            return CHOOSING
+    
     # --- Admin Accessibility ---
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
+        context.user_data["admin_panel"] = "access"
         await update.message.reply_text(
             "🔐 پنل مدیریت:",
             reply_markup=ReplyKeyboardMarkup([
@@ -330,6 +363,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Admin Management ---
     if is_admin and text == "مدیریت ادمین‌ها":
+        context.user_data["admin_panel"] = "admin_mgmt"
         await update.message.reply_text(
             "👑 مدیریت ادمین‌ها:",
             reply_markup=ReplyKeyboardMarkup([
@@ -340,7 +374,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     if is_admin and text == "تنظیم رمز ادمینی":
-        admin_pass = db.get("admin_password", "تعریف نشده")
+        admin_pass = userdata.get("admin_password", "تعریف نشده")
         await update.message.reply_text(
             f"🔐 رمز ادمینی فعلی:\n\n<code>{admin_pass}</code>",
             parse_mode="HTML",
@@ -358,7 +392,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAITING_ADMIN_PASSWORD_EDIT
     
-    
+    #==============================================================================
             
     if is_admin:
         if text == "➕ افزودن دکمه":
@@ -685,17 +719,27 @@ async def rename_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- ADMIN ACTIONS HANDLERS ---
-
 async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_pass = update.message.text.strip()
-    db = load_db()
+    text = update.message.text.strip()
 
-    if len(new_pass) < 4:
+    # ❌ اگر کاربر منصرف شد
+    if text in ["🔙 بازگشت", "❌ لغو"]:
+        await update.message.reply_text(
+            "لغو شد.",
+            reply_markup=ReplyKeyboardMarkup([
+                ["مدیریت ادمین‌ها"],
+                ["🔙 بازگشت"]
+            ], resize_keyboard=True)
+        )
+        return CHOOSING
+
+    if len(text) < 4:
         await update.message.reply_text("❌ رمز خیلی کوتاه است.")
         return WAITING_ADMIN_PASSWORD_EDIT
 
-    db["admin_password"] = new_pass
-    save_db(db)
+    userdata = load_userdata()   # 👈 پایین توضیح دادم
+    userdata["admin_password"] = text
+    save_userdata(userdata)
 
     await update.message.reply_text(
         "✅ رمز ادمینی با موفقیت تغییر کرد.",
@@ -705,6 +749,7 @@ async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ], resize_keyboard=True)
     )
     return CHOOSING
+
 
 
 def is_valid_node_id(text, db):
