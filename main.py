@@ -85,7 +85,8 @@ logging.basicConfig(
     WAITING_CONTENT,
     WAITING_RESTORE_FILE,
     WAITING_RENAME_BUTTON
-) = range(5)
+    WAITING_ADMIN_PASSWORD_EDIT
+) = range(6)
 
 
 # --- DATABASE HANDLERS ---
