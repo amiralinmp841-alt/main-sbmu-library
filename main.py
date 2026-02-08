@@ -1046,7 +1046,7 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(current_node_id, True)
     )
 
-    # تعداد دکمه اضافه شده هر ادمین
+    # تعداد دکمه اضافه شده هر ادمین----- admin panel =============================================
     userdata = load_userdata()
     if "sub_admins_buttons" not in userdata:
         userdata["sub_admins_buttons"] = {}
@@ -1060,7 +1060,7 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ دکمه '{text}' ساخته شد.",
         reply_markup=get_keyboard(current_node_id, True)
     )
-
+    #================================================================================================
     return CHOOSING
 
 
@@ -1277,22 +1277,24 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler('start', start)]
     )
 
-    application.add_handler(conv_handler, group=1)
-    
-    # --- Health check جداگانه برای uptime.com ---
-    from flask import Flask
-    import threading
+#    application.add_handler(conv_handler, group=1)
+#    
+#    # --- Health check جداگانه برای uptime.com ---
+#    from flask import Flask
+#    import threading
+#
+#    app = Flask(__name__)
+#
+#    @app.route("/")
+#    def home():
+#        return "OK", 200
+#
+#    def run_flask():
+#        app.run(host="0.0.0.0", port=8080)
+#
+#    threading.Thread(target=run_flask, daemon=True).start()
 
-    app = Flask(__name__)
 
-    @app.route("/")
-    def home():
-        return "OK", 200
-
-    def run_flask():
-        app.run(host="0.0.0.0", port=8080)
-
-    threading.Thread(target=run_flask, daemon=True).start()
 
     # --- حالا ربات webhook رو اجرا کن ---
     # ❗ خیلی مهم
