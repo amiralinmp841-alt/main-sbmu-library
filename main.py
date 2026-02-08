@@ -1278,26 +1278,21 @@ if __name__ == "__main__":
 
     application.add_handler(conv_handler, group=1)
 
-    # --- Flask health check برای uptime.com ---
+    # Health check روی همان پورت رندر
     from flask import Flask
-    import threading
+    from werkzeug.middleware.dispatcher import DispatcherMiddleware
+    from telegram.ext import Application
 
-    health_app = Flask(__name__)
+    health_app = Flask("healthcheck")
 
     @health_app.route("/healthz")
     def health_check():
         return "OK", 200
 
-    def run_health_flask():
-        health_app.run(host="0.0.0.0", port=8080)
-
-    threading.Thread(target=run_health_flask, daemon=True).start()
-
-    # --- حالا ربات webhook رو اجرا کن ---
-    # ❗ توجه: webhook روی پورت اصلی (مثلاً 10000) هست، health check روی پورت 8080
+    # Combine Flask health check با webhook telegram
     application.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
+        port=int(os.environ.get("PORT", 10000)),  # همین پورتی که Render می‌ده
         url_path=TOKEN,
         webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
     )
