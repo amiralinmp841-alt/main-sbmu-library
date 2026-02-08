@@ -1218,8 +1218,8 @@ if __name__ == "__main__":
         exit(1)
 
     # --- Restore فوری و start sync thread ---
-    #initial_restore()      # restore دیتای DB و userdata قبل از start bot
-    #start_sync_thread()    # thread watcher برای sync اتوماتیک
+    initial_restore()      # restore دیتای DB و userdata قبل از start bot
+    start_sync_thread()    # thread watcher برای sync اتوماتیک
     # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
 
@@ -1277,7 +1277,7 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler('start', start)]
     )
 
-#    application.add_handler(conv_handler, group=1)
+    application.add_handler(conv_handler, group=1)
 #    
 #    # --- Health check جداگانه برای uptime.com ---
 #    from flask import Flask
