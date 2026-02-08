@@ -1219,7 +1219,7 @@ if __name__ == "__main__":
 
     # --- Restore فوری و start sync thread ---
     initial_restore()      # restore دیتای DB و userdata قبل از start bot
-    start_sync_thread()    # thread watcher برای sync اتوماتیک
+    #start_sync_thread()    # thread watcher برای sync اتوماتیک
     # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
 
