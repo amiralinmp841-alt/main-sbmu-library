@@ -35,24 +35,37 @@ DEFAULT_DATABASE = {
 }
 
 
-# --------- reset check ---------
+# ---------- validity check ----------
 
-def is_userdata_valid(path):
+def is_valid_userdata(path):
     data = read_json(path)
-    return isinstance(data, dict) and "admin_password" in data
+    return "admin_password" in data
 
 
-def is_database_valid(path):
+def is_valid_database(path):
     data = read_json(path)
-    if not isinstance(data, dict):
+
+    if "root" not in data:
         return False
 
-    root = data.get("root")
-    if not isinstance(root, dict):
+    root = data["root"]
+
+    if "children" not in root:
         return False
 
-    children = root.get("children")
-    return isinstance(children, list) and len(children) > 0
+    return isinstance(root["children"], list) and len(root["children"]) > 0
+
+    def needs_restore(name, path):
+    if not os.path.exists(path):
+        return True
+
+    if name == "userdata":
+        return not is_valid_userdata(path)
+
+    if name == "database":
+        return not is_valid_database(path)
+
+    return False
 
 
 # ---------- utils ----------
@@ -119,20 +132,17 @@ def watcher():
     while True:
         for name, path in FILES.items():
 
-            data = read_json(path)
+            # 1️⃣ اگر فایل خراب/ریست شده → فقط restore
+            if needs_restore(name, path):
+                restore_from_supabase(name, path)
+                last_hash[name] = file_hash(path)
+                continue
+
+            # 2️⃣ اگر سالم بود → بررسی تغییر برای push
             h = file_hash(path)
 
-            # 1️⃣ اول تشخیص ریست / ناقص
-            if name == "userdata" and not is_userdata_valid(path):
-                restore_from_supabase(name, path)
-                continue
-
-            if name == "database" and not is_database_valid(path):
-                restore_from_supabase(name, path)
-                continue
-
-            # 2️⃣ فقط اگر معتبر بود → push
             if h != last_hash.get(name):
+                data = read_json(path)
                 push_to_supabase(name, data)
                 last_hash[name] = h
 
@@ -145,11 +155,7 @@ def initial_restore():
     print("[SYNC] Initial restore check")
 
     for name, path in FILES.items():
-
-        if name == "userdata" and not is_userdata_valid(path):
-            restore_from_supabase(name, path)
-
-        elif name == "database" and not is_database_valid(path):
+        if needs_restore(name, path):
             restore_from_supabase(name, path)
 
 
