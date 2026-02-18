@@ -345,7 +345,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.1.15🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.1🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -947,10 +947,8 @@ async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def ensure_numeric_id(text: str):
     text = text.strip()
     if not text.isdigit():
-        return None  # ورودی معتبر نیست
-    return text  # آیدی عددی به صورت string
-
-
+        return None
+    return int(text)   # 👈 این مهمه
 
 async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -969,13 +967,12 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
+    sub_admins = [int(x) for x in sub_admins]
 
-    # جلوگیری از اضافه شدن ادمین اصلی
     if new_admin in ADMIN_IDS:
         await update.message.reply_text("❌ این فرد قبلاً ادمین اصلی است.")
         return WAITING_ADD_ADMIN
 
-    # اضافه کردن
     if new_admin not in sub_admins:
         sub_admins.append(new_admin)
         userdata["sub_admins"] = sub_admins
@@ -983,8 +980,7 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "sub_admins_buttons" not in userdata:
             userdata["sub_admins_buttons"] = {}
 
-        if new_admin not in userdata["sub_admins_buttons"]:
-            userdata["sub_admins_buttons"][new_admin] = 0
+        userdata["sub_admins_buttons"][str(new_admin)] = 0
 
         save_userdata(userdata)
 
@@ -993,12 +989,9 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_keyboard("admin_mgmt", True)
         )
         return CHOOSING
-
     else:
         await update.message.reply_text("❌ این فرد قبلاً ادمین فرعی است.")
         return WAITING_ADD_ADMIN
-
-
 
 async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -1017,8 +1010,8 @@ async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
+    sub_admins = [int(x) for x in sub_admins]
 
-    # جلوگیری از حذف ادمین اصلی
     if admin_id in ADMIN_IDS:
         await update.message.reply_text("❌ نمی‌توان ادمین اصلی را حذف کرد.")
         return WAITING_REMOVE_ADMIN
@@ -1028,7 +1021,7 @@ async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         userdata["sub_admins"] = sub_admins
 
         if "sub_admins_buttons" in userdata:
-            userdata["sub_admins_buttons"].pop(admin_id, None)
+            userdata["sub_admins_buttons"].pop(str(admin_id), None)
 
         save_userdata(userdata)
 
