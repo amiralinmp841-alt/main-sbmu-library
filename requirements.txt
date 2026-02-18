@@ -2,7 +2,9 @@ python-telegram-bot[webhooks,job-queue]==20.7
 flask
 waitress
 requests
-supabase>=2.0.0
+httpx==0.25.2
+supabase==2.3.4
+
 
 
 
