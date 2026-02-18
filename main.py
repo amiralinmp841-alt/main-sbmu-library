@@ -18,6 +18,9 @@ from telegram.ext import (
 import copy
 from flask import Flask
 import threading
+import asyncio
+from aiohttp import web
+
 
 def delete_node_recursive(db, node_id):
     # اگر نود وجود نداشت
@@ -49,6 +52,9 @@ def push_admin_history(context, db):
     future.clear()
 
 # --- CONFIGURATION ---
+
+# --- wewb port ---
+PORT = int(os.environ.get("PORT", 10000))
 
 # --- supabase ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -1314,10 +1320,8 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-if __name__ == "__main__":
-    if not TOKEN:
-        print("Error: TOKEN not found in environment variables.")
-        exit(1)
+# ================= BUILD APPLICATION =================
+def build_application():
 
     # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
@@ -1377,24 +1381,45 @@ if __name__ == "__main__":
 
     application.add_handler(conv_handler, group=1)
 
-    # --- Flask health check برای Uptime ---
-    from flask import Flask
-    import threading
+    return application
 
-app = Flask("health")
+# ================= HEALTH & WEBHOOK =================
+async def health(request):
+    return web.Response(text="OK")
 
-@app.route("/")
-def health():
-    return "OK", 200
+async def webhook_handler(request):
+    app = request.app["tg"]
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
+    return web.Response(text="OK")
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
-    return "OK", 200
+# ================= MAIN =================
+async def main():
+    tg_app = build_application()
+    await tg_app.initialize()
+    await tg_app.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
 
-    # ست کردن Webhook تلگرام
-    application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
+    # aiohttp web app برای Health check و Webhook
+    webapp = web.Application()
+    webapp["tg"] = tg_app
+    webapp.router.add_get("/", health)
+    webapp.router.add_get("/health", health)
+    webapp.router.add_post(f"/{TOKEN}", webhook_handler)
 
-    # اجرا روی پورتی که Render می‌دهد
-    app.run(host="0.0.0.0", port=PORT)
+    runner = web.AppRunner(webapp)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+
+    await tg_app.start()
+    await asyncio.Event().wait()  # برنامه همیشه اجرا باقی می‌ماند
+
+if name == "main":
+    asyncio.run(main())
+
+
+
+
+
+
+
