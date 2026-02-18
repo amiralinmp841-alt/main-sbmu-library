@@ -345,7 +345,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.4🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.5🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -526,7 +526,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_REMOVE_ADMIN
 
     if is_admin and text == "📋 لیست ادمین‌ها":
-        return await list_admins(update, context)
+        await list_admins(update, context)
+        return CHOOSING
 
     if text == "❌ لغو":
         await update.message.reply_text(
