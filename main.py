@@ -345,7 +345,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.6🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.7🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -484,6 +484,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
         )
         return WAITING_ADMIN_PASSWORD_EDIT
+
     if is_admin and text == "📤 دریافت userdata":
     
         userdata = load_userdata()
@@ -528,6 +529,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin and text == "📋 لیست ادمین‌ها":
         await list_admins(update, context)
         await update.message.reply_text(
+            msg,
             reply_markup=ReplyKeyboardMarkup([
                 ["🔑 تنظیم رمز ادمینی"],
                 ["➕ افزودن ادمین", "➖ حذف ادمین"],
