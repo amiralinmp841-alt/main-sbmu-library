@@ -1414,7 +1414,7 @@ async def main():
     await tg_app.start()
     await asyncio.Event().wait()  # برنامه همیشه اجرا باقی می‌ماند
 
-if name == "main":
+if __name__=="__main__":
     asyncio.run(main())
 
 
