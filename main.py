@@ -18,6 +18,7 @@ from telegram.ext import (
 import copy
 from flask import Flask
 import threading
+from supabase import create_client
 
 def delete_node_recursive(db, node_id):
     # اگر نود وجود نداشت
@@ -50,12 +51,19 @@ def push_admin_history(context, db):
 
 # --- CONFIGURATION ---
 
+# --- supabase ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "db")
+SUPABASE_DB_FILE = os.getenv("SUPABASE_DB_FILE", "database.json")
+
 # --- admin pannel
 ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
+
 # --- webhook_url مخصوص رندر
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-# توکن و آیدی عددی ادمین از متغیرهای محیطی خوانده می‌شود
 
+# توکن و آیدی عددی ادمین از متغیرهای محیطی خوانده می‌شود
 TOKEN = os.getenv("TOKEN")
 import os
 
@@ -92,30 +100,75 @@ logging.basicConfig(
 ) = range(9)
 
 
-# --- DATABASE HANDLERS ---
+# --- DATABASE HANDLERS --- -------------------------------------------------------------------------------------
+DB_FILE = "/tmp/database.json"
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+# --- Download DB from Supabase ---
+def download_db_from_supabase():
+    try:
+        resp = supabase.storage.from_(SUPABASE_BUCKET).download(SUPABASE_DB_FILE)
+        if resp:
+            with open(DB_FILE, "wb") as f:
+                f.write(resp)
+            print("⬇️ DB synced from Supabase")
+            return True
+    except Exception as e:
+        print("❌ Failed to download DB:", e)
+    return False
+
+
+# --- Upload DB to Supabase ---
+def upload_db_to_supabase():
+    try:
+        with open(DB_FILE, "rb") as f:
+            supabase.storage.from_(SUPABASE_BUCKET).upload(
+                SUPABASE_DB_FILE, f, file_options={"content-type": "application/json", "upsert": "true"}
+            )
+        print("⬆️ DB uploaded to Supabase")
+        return True
+    except Exception as e:
+        print("❌ Failed to upload DB:", e)
+    return False
+
+
+# --- LOAD DB ---
 def load_db():
+    # اگر فایل محلی وجود ندارد → از Supabase دانلود کن
     if not os.path.exists(DB_FILE):
-        # ساختار اولیه: روت (خانه)
-        initial_db = {
-            "root": {
-                "name": "خانه",
-                "parent": None,
-                "children": [], # لیست دکمه‌های زیرمجموعه (ID نودهای فرزند)
-                "contents": []  # لیست محتواهای این صفحه (File_IDs)
+        print("⚠️ Local DB not found. Restoring from Supabase...")
+        if not download_db_from_supabase():
+            print("⚠️ Supabase DB not found, creating new DB")
+            initial_db = {
+                "root": {
+                    "name": "خانه",
+                    "parent": None,
+                    "children": [],
+                    "contents": []
+                }
             }
-        }
-        save_db(initial_db)
-        return initial_db
+            save_db(initial_db)
+            return initial_db
+
+    # فایل محلی را لود کن
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
+
+# --- SAVE DB ---
 def save_db(data):
+    # ذخیره لوکال
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+    # آپلود در Supabase
+    upload_db_to_supabase()
+#==========================================================================================================
 
 
 
