@@ -144,17 +144,20 @@ def upload_db_to_supabase():
         }
 
         with open(DB_FILE, "rb") as f:
-            response = requests.post(
-                url + "?upsert=true",
+            response = requests.put(
+                url,
                 headers=headers,
                 data=f
             )
+
+        print("UPLOAD STATUS:", response.status_code)
+        print("UPLOAD RESPONSE:", response.text)
 
         if response.status_code in (200, 201):
             print("⬆️ DB uploaded to Supabase")
             return True
         else:
-            print("❌ Upload failed:", response.text)
+            print("❌ Upload failed")
 
     except Exception as e:
         print("❌ Failed to upload DB:", e)
