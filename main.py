@@ -261,7 +261,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.1.7🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.1.8🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -275,7 +275,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
-    # --- Check Admin Password --- ----------------------------------------------------------
+    # --- Check Admin Password --- ---------------------------------------------------------------------------------------
     admin_pass = userdata.get("admin_password")
     if admin_pass and text == admin_pass:
         if user_id not in ADMIN_IDS and user_id not in userdata.get("sub_admins", []):
@@ -295,7 +295,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🔗 @{update.effective_user.username}"
                     )
         return CHOOSING
-    
+    #=====================================================================================================================
     # بازیابی نود فعلی
     current_node_id = context.user_data.get('current_node', 'root')
     db = load_db()
@@ -329,7 +329,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     # --- 2. هندل کردن دستورات ادمین ---
-    # --- Admin panel back handling -----------------------------------------
+    # --- Admin panel back handling ------------------------------------------------------------------------------------------
     if text == "🔙 بازگشت" and context.user_data.get("admin_panel"):
         panel = context.user_data["admin_panel"]
     
@@ -354,7 +354,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return CHOOSING
     
-    # --- Admin Accessibility ---==============================================================
+    # --- Admin Accessibility ---=======================================================================
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
         context.user_data["admin_panel"] = "access"
         await update.message.reply_text(
@@ -375,8 +375,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 مدیریت ادمین‌ها:",
             reply_markup=ReplyKeyboardMarkup([
                 ["🔑 تنظیم رمز ادمینی"],
-                #["➕ افزودن ادمین", "➖ حذف ادمین"],
-                #["📋 لیست ادمین‌ها"],
+                #["➕ افزودن ادمین", "➖ حذف ادمین"],  #کار نمیکنه
+                #["📋 لیست ادمین‌ها"],     #کار نمیکنه
                 ["🔙 بازگشت"]
             ], resize_keyboard=True)
         )
@@ -449,7 +449,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
     
     
-    #==============================================================================
+    #=============================================================================================================================================
             
     if is_admin:
         if text == "➕ افزودن دکمه":
@@ -1046,7 +1046,7 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(current_node_id, True)
     )
 
-    # تعداد دکمه اضافه شده هر ادمین----- admin panel =============================================
+    # تعداد دکمه اضافه شده هر ادمین ---------------------------------------------------------------------------
     userdata = load_userdata()
     if "sub_admins_buttons" not in userdata:
         userdata["sub_admins_buttons"] = {}
@@ -1057,10 +1057,10 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_userdata(userdata)
     
     await update.message.reply_text(
-        f"✅ دکمه '{text}' ساخته شد.",
+        #f"✅ دکمه '{text}' ساخته شد.",
         reply_markup=get_keyboard(current_node_id, True)
     )
-    #================================================================================================
+
     return CHOOSING
 
 
@@ -1206,19 +1206,10 @@ async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --- supabase --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-from supasync import start_sync_thread, initial_restore
-
-# --------------------
-# --- MAIN --- مخصوص رندر
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: TOKEN not found in environment variables.")
         exit(1)
-
-    # --- Restore فوری و start sync thread ---
-    initial_restore()      # restore دیتای DB و userdata قبل از start bot
-    start_sync_thread()    # thread watcher برای sync اتوماتیک
 
     # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
