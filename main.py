@@ -1144,10 +1144,16 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "👑 ادمین‌های اصلی:\n"
     for aid in ADMIN_IDS:
         count = buttons_count.get(str(aid), 0)
-        # اسم ادمین رو به لینک پروفایل کاربر می‌کنیم
-        # فرض می‌کنیم تو یه dict داری که اسم و یوزرنیم اصلی ادمینارو نگه می‌داره، مثلا ADMIN_NAMES[aid] و ADMIN_USERNAMES[aid]
-        name = ADMIN_NAMES.get(aid, str(aid))
-        username = ADMIN_USERNAMES.get(aid, "")
+        try:
+            # گرفتن اطلاعات واقعی کاربر از تلگرام
+            chat = await context.bot.get_chat(aid)
+            name = chat.full_name
+            username = chat.username or ""
+        except Exception:
+            # اگر نتوانستیم، fallback به آیدی
+            name = str(aid)
+            username = ""
+
         if username:
             msg += f'- <a href="tg://user?id={aid}">{name} (@{username})</a> | {aid} | تعداد دکمه: {count}\n'
         else:
@@ -1158,8 +1164,14 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sorted_sub_admins = sorted(sub_admins, key=lambda x: buttons_count.get(str(x),0), reverse=True)
     for aid in sorted_sub_admins:
         count = buttons_count.get(str(aid), 0)
-        name = userdata.get("sub_admin_names", {}).get(str(aid), str(aid))
-        username = userdata.get("sub_admin_usernames", {}).get(str(aid), "")
+        try:
+            chat = await context.bot.get_chat(aid)
+            name = chat.full_name
+            username = chat.username or ""
+        except Exception:
+            name = userdata.get("sub_admin_names", {}).get(str(aid), str(aid))
+            username = userdata.get("sub_admin_usernames", {}).get(str(aid), "")
+
         if username:
             msg += f'- <a href="tg://user?id={aid}">{name} (@{username})</a> | {aid} | تعداد دکمه: {count}\n'
         else:
@@ -1168,7 +1180,7 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         msg, 
         reply_markup=get_keyboard("admin_mgmt", True),
-        parse_mode="HTML"  # خیلی مهم برای اینکه لینک‌ها کار کنه
+        parse_mode="HTML"
     )
     return CHOOSING
 
