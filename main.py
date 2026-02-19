@@ -1,9 +1,3 @@
-# --- مخصوص baby  ها ---
-# --- مخصوص baby  ها ---
-# --- مخصوص baby  ها ---
-# --- مخصوص baby  ها ---
-# --- مخصوص baby  ها ---
-# --- مخصوص baby  ها ---
 import logging
 import json
 import os
@@ -357,7 +351,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V.A_4.3.2🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.13🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -1390,7 +1384,7 @@ def build_application():
 
     return application
 
-# ================= HEALTH & WEBHOOK وب ۲ =================
+# ================= HEALTH & WEBHOOK =================
 async def health(request):
     return web.Response(text="OK")
 
@@ -1401,106 +1395,11 @@ async def webhook_handler(request):
     await app.process_update(update)
     return web.Response(text="OK")
 
-
-# ================= بررسی چند URL وب دیگر =================
-WEBHOOKS_TO_CHECK = os.environ.get("WEBHOOK_URLS_TO_CHECK", "").split(",")
-# مثال: "https://web1.render.com,https://web3.render.com"
-
-
-
-# ================= MAIN وب ۲ =================
+# ================= MAIN =================
 async def main():
-    tg_app = build_application()  # همان اپلیکیشن ربات
+    tg_app = build_application()
     await tg_app.initialize()
-
-    active = False  # آیا my_webhook_url کنترل ربات را گرفته؟
-    failed_count = 0
-    success_count = 0
-
-    # مانیتور وضعیت وب‌های دیگر
-    import aiohttp
-    import asyncio
-    
-    async def monitor():
-        nonlocal active
-    
-        my_webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-        primary_urls = [url.strip() for url in WEBHOOKS_TO_CHECK if url.strip()]
-    
-        timeout = aiohttp.ClientTimeout(total=3)
-    
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-    
-            while True:
-                alive_url = None
-    
-                # -------------------------------
-                # 1️⃣ بررسی همزمان همه Primary ها
-                # -------------------------------
-                async def check(url):
-                    try:
-                        async with session.get(f"{url}/health") as r:
-                            if r.status == 200:
-                                text = await r.text()
-                                if text.strip() == "OK":
-                                    return url
-                    except:
-                        return None
-    
-                tasks = [check(url) for url in primary_urls]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-                for result in results:
-                    if isinstance(result, str):
-                        alive_url = result
-                        break
-    
-                # -------------------------------
-                # 2️⃣ گرفتن webhook فعلی
-                # -------------------------------
-                try:
-                    info = await tg_app.bot.get_webhook_info()
-                    current_webhook = info.url
-                except Exception as e:
-                    print("❌ خطا در گرفتن webhook info:", e)
-                    await asyncio.sleep(5)
-                    continue
-    
-                # =================================
-                # اگر حتی یکی زنده بود → ما خاموش
-                # =================================
-                if alive_url:
-                    alive_webhook = f"{alive_url}/{TOKEN}"
-    
-                    if current_webhook == my_webhook_url:
-                        print("🛑 Primary زنده است → انتقال webhook")
-                        try:
-                            await tg_app.bot.set_webhook(alive_webhook)
-                            print("✅ کنترل برگشت به Primary زنده")
-                        except Exception as e:
-                            print("❌ خطا در انتقال:", e)
-    
-                    active = False
-    
-                # =================================
-                # اگر هیچکدام زنده نبودند → ما فعال
-                # =================================
-                else:
-                    if current_webhook != my_webhook_url:
-                        print("🔥 همه Primary ها offline → فعال شدن")
-                        try:
-                            await tg_app.bot.set_webhook(my_webhook_url)
-                            print("✅ webhook روی این وب تنظیم شد")
-    
-                            if download_db_from_supabase():
-                                print("⬇️ DB sync شد")
-                        except Exception as e:
-                            print("❌ خطا در فعال‌سازی:", e)
-    
-                    active = True
-    
-                await asyncio.sleep(5)
-    
+    await tg_app.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
 
     # aiohttp web app برای Health check و Webhook
     webapp = web.Application()
@@ -1513,12 +1412,11 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
-    # 🚀 اجرای مانیتور وضعیت وب‌های دیگر
-    asyncio.create_task(monitor())
+    # ❌ دیگر tg_app.start() نیاز نیست
+    # await tg_app.start()
 
     # برنامه همیشه اجرا باقی بماند
     await asyncio.Event().wait()
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     asyncio.run(main())
