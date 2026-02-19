@@ -215,7 +215,6 @@ def save_db(data):
 BACKUP_FILE = "/tmp/backup_database.zip"
 
 # --- user data --- --- --- --- --- --- --- --- --- =====================================================================
-userdata = load_userdata()
 
 def download_userdata_from_supabase():
     try:
@@ -298,7 +297,7 @@ def save_userdata(data):
     # آپلود در Supabase
     upload_userdata_to_supabase()
 
-
+userdata = load_userdata()
 # --- KEYBOARD BUILDERS --- #=====================================================================================================================
 def get_keyboard(node_id, is_admin):
     db = load_db()
