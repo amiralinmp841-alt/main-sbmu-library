@@ -1142,48 +1142,65 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons_count = userdata.get("sub_admins_buttons", {})
 
     msg = "👑 ادمین‌های اصلی:\n"
-    for aid in ADMIN_IDS:
+
+    # مرتب سازی ادمین‌های اصلی بر اساس تعداد دکمه (زیاد به کم)
+    sorted_main_admins = sorted(
+        ADMIN_IDS,
+        key=lambda x: buttons_count.get(str(x), 0),
+        reverse=True
+    )
+
+    for aid in sorted_main_admins:
         count = buttons_count.get(str(aid), 0)
         try:
-            # گرفتن اطلاعات واقعی کاربر از تلگرام
             chat = await context.bot.get_chat(aid)
             name = chat.full_name
-            username = chat.username or ""
+            username = chat.username
         except Exception:
-            # اگر نتوانستیم، fallback به آیدی
             name = str(aid)
-            username = ""
+            username = None
 
+        # ساخت اسم آبی لینک شده + یوزرنیم داخلش
         if username:
-            msg += f'- <a href="tg://user?id={aid}">{name} (@{username})</a> | {aid} | تعداد دکمه: {count}\n'
+            display_name = f"{name} (@{username})"
         else:
-            msg += f'- <a href="tg://user?id={aid}">{name}</a> | {aid} | تعداد دکمه: {count}\n'
+            display_name = name
+
+        msg += f'- <a href="tg://user?id={aid}">{display_name}</a> | {aid} | تعداد دکمه: {count}\n'
 
     msg += "\n👤 ادمین‌های فرعی:\n"
-    # مرتب‌سازی فرعی‌ها بر اساس تعداد دکمه اضافه شده (زیاد به کم)
-    sorted_sub_admins = sorted(sub_admins, key=lambda x: buttons_count.get(str(x),0), reverse=True)
+
+    # مرتب سازی فرعی‌ها بر اساس تعداد دکمه (زیاد به کم)
+    sorted_sub_admins = sorted(
+        sub_admins,
+        key=lambda x: buttons_count.get(str(x), 0),
+        reverse=True
+    )
+
     for aid in sorted_sub_admins:
         count = buttons_count.get(str(aid), 0)
         try:
             chat = await context.bot.get_chat(aid)
             name = chat.full_name
-            username = chat.username or ""
+            username = chat.username
         except Exception:
-            name = userdata.get("sub_admin_names", {}).get(str(aid), str(aid))
-            username = userdata.get("sub_admin_usernames", {}).get(str(aid), "")
+            name = str(aid)
+            username = None
 
         if username:
-            msg += f'- <a href="tg://user?id={aid}">{name} (@{username})</a> | {aid} | تعداد دکمه: {count}\n'
+            display_name = f"{name} (@{username})"
         else:
-            msg += f'- <a href="tg://user?id={aid}">{name}</a> | {aid} | تعداد دکمه: {count}\n'
+            display_name = name
+
+        msg += f'- <a href="tg://user?id={aid}">{display_name}</a> | {aid} | تعداد دکمه: {count}\n'
 
     await update.message.reply_text(
-        msg, 
+        msg,
         reply_markup=get_keyboard("admin_mgmt", True),
         parse_mode="HTML"
     )
-    return CHOOSING
 
+    return CHOOSING
 #=============================================================================================================================================
 def is_valid_node_id(text, db):
     return text in db and isinstance(db[text], dict)
