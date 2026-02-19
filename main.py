@@ -351,7 +351,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.11🔥)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.12🔥)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -1269,6 +1269,7 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ✅ نوشتن دیتابیس
             with open(DB_FILE, "wb") as f:
                 f.write(zf.read(db_name))
+            upload_db_to_supabase()
 
         # 🔥 پاک کردن لاگ تغییرات ادمین
         context.user_data.pop("admin_history", None)
@@ -1419,10 +1420,3 @@ async def main():
 
 if __name__=="__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
