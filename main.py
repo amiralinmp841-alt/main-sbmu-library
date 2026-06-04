@@ -27,7 +27,8 @@ import threading
 import asyncio
 from aiohttp import web
 import requests
-
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 
 def delete_node_recursive(db, node_id):
@@ -64,15 +65,9 @@ def push_admin_history(context, db):
 # --- wewb port ---
 PORT = int(os.environ.get("PORT", 10000))
 
-# --- supabase --- database
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "db")
-SUPABASE_DB_FILE = os.getenv("SUPABASE_DB_FILE", "database.json")
 
-# --- supabase --- userdata
+# ------ userdata -------
 USERDATA_FILE = "/tmp/userdata.json"
-SUPABASE_USERDATA_FILE = "userdata.json"   # اسم داخل bucket
 
 # --- admin pannel
 ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
@@ -117,77 +112,153 @@ logging.basicConfig(
 ) = range(9)
 
 
-# ============ DATABASE USERDATA =========== ============ DATABASE USERDATA =========== ============ DATABASE USERDATA =========== ============ DATABASE USERDATA ===========
+# ============ TELEGRAM USER API BACKUP CONFIG ============
 
 DB_FILE = "/tmp/database.json"
+USERDATA_FILE = "/tmp/userdata.json"
 
-# --- Download DB from Supabase ---
+TG_API_ID = int(os.getenv("TG_API_ID", "0"))
+TG_API_HASH = os.getenv("TG_API_HASH")
+TG_SESSION_STRING = os.getenv("TG_SESSION_STRING")
 
-def download_db_from_supabase():
+DB_BACKUP_CHAT_ID = int(os.getenv("DB_BACKUP_CHAT_ID", "0"))
+USERDATA_BACKUP_CHAT_ID = int(os.getenv("USERDATA_BACKUP_CHAT_ID", "0"))
+
+
+# ============ TELETHON SEPARATE EVENT LOOP ============
+
+telethon_loop = asyncio.new_event_loop()
+telethon_client = None
+telethon_ready = threading.Event()
+
+
+def start_telethon_loop():
+    """
+    Telethon client runs in a separate thread and separate event loop.
+    This prevents conflicts with bot async loop.
+    """
+    global telethon_client
+
+    asyncio.set_event_loop(telethon_loop)
+
+    telethon_client = TelegramClient(
+        StringSession(TG_SESSION_STRING),
+        TG_API_ID,
+        TG_API_HASH,
+        loop=telethon_loop
+    )
+
+    async def init_client():
+        await telethon_client.start()
+        print("✅ Telethon User API client started")
+        telethon_ready.set()
+
+    telethon_loop.run_until_complete(init_client())
+    telethon_loop.run_forever()
+
+
+telethon_thread = threading.Thread(target=start_telethon_loop, daemon=True)
+telethon_thread.start()
+
+
+def run_telethon(coro):
+    """
+    Run async Telethon functions from normal sync code.
+    """
+    telethon_ready.wait(timeout=30)
+
+    if not telethon_ready.is_set():
+        print("❌ Telethon client not ready")
+        return None
+
+    future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
+    return future.result(timeout=120)
+
+
+# ============ TELEGRAM FILE BACKUP HELPERS ============
+
+async def _upload_file_to_telegram(chat_id, file_path, caption=None):
     try:
-        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{SUPABASE_DB_FILE}"
+        if not os.path.exists(file_path):
+            print(f"❌ File not found for upload: {file_path}")
+            return False
 
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-        }
+        await telethon_client.send_file(
+            entity=chat_id,
+            file=file_path,
+            caption=caption or f"backup: {os.path.basename(file_path)}"
+        )
 
-        response = requests.get(url, headers=headers)
-
-        if response.status_code == 200:
-            with open(DB_FILE, "wb") as f:
-                f.write(response.content)
-            print("⬇️ DB synced from Supabase")
-            return True
-        else:
-            print("❌ Download failed:", response.text)
+        print(f"⬆️ Uploaded to Telegram group: {file_path}")
+        return True
 
     except Exception as e:
-        print("❌ Failed to download DB:", e)
+        print(f"❌ Failed to upload file to Telegram: {e}")
+        return False
 
-    return False
 
-
-# --- Upload DB to Supabase ---
-def upload_db_to_supabase():
+async def _download_latest_file_from_telegram(chat_id, filename, save_path):
     try:
-        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{SUPABASE_DB_FILE}"
+        print(f"🔍 Searching latest {filename} in Telegram group {chat_id}...")
 
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
+        async for message in telethon_client.iter_messages(chat_id, limit=200):
+            if not message.file:
+                continue
 
-        with open(DB_FILE, "rb") as f:
-            response = requests.put(
-                url,
-                headers=headers,
-                data=f
-            )
+            original_name = message.file.name if message.file.name else None
+            caption = message.message or ""
 
-        print("UPLOAD STATUS:", response.status_code)
-        print("UPLOAD RESPONSE:", response.text)
+            if original_name == filename or filename in caption:
+                await message.download_media(file=save_path)
+                print(f"⬇️ Downloaded latest {filename} from Telegram group")
+                return True
 
-        if response.status_code in (200, 201):
-            print("⬆️ DB uploaded to Supabase")
-            return True
-        else:
-            print("❌ Upload failed")
+        print(f"⚠️ No file named {filename} found in Telegram group")
+        return False
 
     except Exception as e:
-        print("❌ Failed to upload DB:", e)
+        print(f"❌ Failed to download file from Telegram: {e}")
+        return False
 
-    return False
+
+def upload_file_to_telegram(chat_id, file_path, caption=None):
+    return run_telethon(
+        _upload_file_to_telegram(chat_id, file_path, caption)
+    )
 
 
-# --- LOAD DB ---
+def download_latest_file_from_telegram(chat_id, filename, save_path):
+    return run_telethon(
+        _download_latest_file_from_telegram(chat_id, filename, save_path)
+    )
+
+
+# ============ DATABASE BACKUP WITH TELEGRAM ============
+
+def download_db_from_telegram():
+    return download_latest_file_from_telegram(
+        chat_id=DB_BACKUP_CHAT_ID,
+        filename="database.json",
+        save_path=DB_FILE
+    )
+
+
+def upload_db_to_telegram():
+    return upload_file_to_telegram(
+        chat_id=DB_BACKUP_CHAT_ID,
+        file_path=DB_FILE,
+        caption="database.json"
+    )
+
+
 def load_db():
-    # اگر فایل محلی وجود ندارد → از Supabase دانلود کن
+    # اگر فایل محلی وجود ندارد، از گروه تلگرام دانلود کن
     if not os.path.exists(DB_FILE):
-        print("⚠️ Local DB not found. Restoring from Supabase...")
-        if not download_db_from_supabase():
-            print("⚠️ Supabase DB not found, creating new DB")
+        print("⚠️ Local DB not found. Restoring from Telegram group...")
+
+        if not download_db_from_telegram():
+            print("⚠️ Telegram DB backup not found, creating new DB")
+
             initial_db = {
                 "root": {
                     "name": "خانه",
@@ -196,6 +267,7 @@ def load_db():
                     "contents": []
                 }
             }
+
             save_db(initial_db)
             return initial_db
 
@@ -203,112 +275,88 @@ def load_db():
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+
+    except Exception as e:
+        print("❌ Failed to load local DB:", e)
         return {}
 
 
-# --- SAVE DB ---
 def save_db(data):
     # ذخیره لوکال
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # آپلود در Supabase
-    upload_db_to_supabase()
-
-#==  =========  =========  ========  ========  ======  ========  ========  =========
-
-# فایل بکاپ روزانه
-BACKUP_FILE = "/tmp/backup_database.zip"
-
-# ============ DATABASE USERDATA END =========== ============ DATABASE USERDATA END =========== ============ DATABASE USERDATA END =========== ============ DATABASE USERDATA
-
-
-# ============ SUPABASE USERDATA =========== ============ SUPABASE USERDATA =========== ============ SUPABASE USERDATA =========== ============ SUPABASE USERDATA =========== 
-
-def download_userdata_from_supabase():
     try:
-        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{SUPABASE_USERDATA_FILE}"
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-        }
-
-        response = requests.get(url, headers=headers)
-
-        if response.status_code == 200:
-            with open(USERDATA_FILE, "wb") as f:
-                f.write(response.content)
-
-            print("⬇️ Userdata synced from Supabase")
-            return True
-        else:
-            print("❌ Userdata download failed:", response.text)
+        print("💾 DB saved locally")
 
     except Exception as e:
-        print("❌ Failed to download userdata:", e)
+        print("❌ Failed to save DB locally:", e)
+        return False
 
-    return False
+    # ارسال به گروه تلگرام
+    return upload_db_to_telegram()
 
 
-def upload_userdata_to_supabase():
-    try:
-        url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{SUPABASE_USERDATA_FILE}"
+# ============ USERDATA BACKUP WITH TELEGRAM ============
 
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
+def download_userdata_from_telegram():
+    return download_latest_file_from_telegram(
+        chat_id=USERDATA_BACKUP_CHAT_ID,
+        filename="userdata.json",
+        save_path=USERDATA_FILE
+    )
 
-        with open(USERDATA_FILE, "rb") as f:
-            response = requests.put(
-                url,
-                headers=headers,
-                data=f
-            )
 
-        print("USERDATA UPLOAD STATUS:", response.status_code)
-
-        if response.status_code in (200, 201):
-            print("⬆️ Userdata uploaded to Supabase")
-            return True
-        else:
-            print("❌ Userdata upload failed:", response.text)
-
-    except Exception as e:
-        print("❌ Failed to upload userdata:", e)
-
-    return False
+def upload_userdata_to_telegram():
+    return upload_file_to_telegram(
+        chat_id=USERDATA_BACKUP_CHAT_ID,
+        file_path=USERDATA_FILE,
+        caption="userdata.json"
+    )
 
 
 def load_userdata():
-    # اگر فایل محلی نبود → از Supabase بگیر
+    # اگر فایل محلی نبود، از گروه تلگرام بگیر
     if not os.path.exists(USERDATA_FILE):
-        print("⚠️ Local userdata not found. Restoring from Supabase...")
-        if not download_userdata_from_supabase():
-            print("⚠️ No userdata in Supabase. Creating new.")
+        print("⚠️ Local userdata not found. Restoring from Telegram group...")
+
+        if not download_userdata_from_telegram():
+            print("⚠️ No userdata backup in Telegram. Creating new userdata.")
+
             save_userdata({})
             return {}
 
     try:
         with open(USERDATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+
+    except Exception as e:
+        print("❌ Failed to load userdata:", e)
         return {}
 
 
 def save_userdata(data):
     # ذخیره لوکال
-    with open(USERDATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(USERDATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # آپلود در Supabase
-    upload_userdata_to_supabase()
+        print("💾 Userdata saved locally")
 
+    except Exception as e:
+        print("❌ Failed to save userdata locally:", e)
+        return False
+
+    # ارسال به گروه تلگرام
+    return upload_userdata_to_telegram()
+
+
+# فایل بکاپ روزانه، اگر در جای دیگری از کدت استفاده می‌شود
+BACKUP_FILE = "/tmp/backup_database.zip"
+
+
+# در انتها، مثل قبل:
 userdata = load_userdata()
-# ======= SUPABASE USERDATA END ======== ============ SUPABASE USERDATA END =========== ============ SUPABASE USERDATA END =========== ============ SUPABASE USERDATA END ========= 
 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
@@ -408,13 +456,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
-    
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     # پاک‌سازی کامل وضعیت قبلی
     context.user_data.clear()
 
-    load_db()
     db = load_db()
 
     args = context.args  # 👈 payload اینجاست
@@ -438,7 +484,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.16)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.18)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -478,8 +524,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_node_id = context.user_data.get('current_node', 'root')
     db = load_db()
     
-
-    
     # ⛔ لغو عملیات‌های موقت (حذف / هش / ویرایش و ...)
     if text == "❌ لغو":
         current = context.user_data.get("current_node", "root")
@@ -487,23 +531,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "لغو شد.",
             reply_markup=get_keyboard(current, is_admin)
         )
-        return CHOOSING
-
-
-    # 1. هندل کردن بازگشت و خانه
-    if text == "🏠 صفحه اصلی":
-        context.user_data['current_node'] = 'root'
-        await update.message.reply_text("به صفحه اصلی بازگشتید.", reply_markup=get_keyboard('root', is_admin))
-        return CHOOSING
-    
-    if text == "🔙 بازگشت":
-        parent = db[current_node_id].get('parent')
-        if parent:
-            context.user_data['current_node'] = parent
-            await update.message.reply_text("بازگشت به عقب.", reply_markup=get_keyboard(parent, is_admin))
-        else:
-            context.user_data['current_node'] = 'root'
-            await update.message.reply_text("شما در صفحه اصلی هستید.", reply_markup=get_keyboard('root', is_admin))
         return CHOOSING
 
     # --- 2. هندل کردن دستورات ادمین ---  --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین ---
@@ -532,6 +559,24 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_keyboard("root", is_admin)
             )
             return CHOOSING
+
+
+    # 1. هندل کردن بازگشت و خانه
+    if text == "🏠 صفحه اصلی":
+        context.user_data['current_node'] = 'root'
+        await update.message.reply_text("به صفحه اصلی بازگشتید.", reply_markup=get_keyboard('root', is_admin))
+        return CHOOSING
+    
+    if text == "🔙 بازگشت":
+        parent = db[current_node_id].get('parent')
+        if parent:
+            context.user_data['current_node'] = parent
+            await update.message.reply_text("بازگشت به عقب.", reply_markup=get_keyboard(parent, is_admin))
+        else:
+            context.user_data['current_node'] = 'root'
+            await update.message.reply_text("شما در صفحه اصلی هستید.", reply_markup=get_keyboard('root', is_admin))
+        return CHOOSING
+
     
     # --- Admin Accessibility --- 
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
@@ -1400,7 +1445,7 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ✅ نوشتن دیتابیس
             with open(DB_FILE, "wb") as f:
                 f.write(zf.read(db_name))
-            upload_db_to_supabase()
+            upload_db_to_telegram()
 
         # 🔥 پاک کردن لاگ تغییرات ادمین
         context.user_data.pop("admin_history", None)
@@ -1422,34 +1467,17 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current = context.user_data.get('current_node', 'root')
-    await update.message.reply_text("لغو شد.", reply_markup=get_keyboard(current, update.effective_user.id == ADMIN_IDS))
-    return CHOOSING
 
-
-async def send_daily_backup(context: ContextTypes.DEFAULT_TYPE):
-    backup_id = os.getenv("BACKUP_ID")
-    if not backup_id:
-        return
-
-    backup_id = int(backup_id)
-
-    if not os.path.exists(DB_FILE):
-        return
-
-    mem_zip = iolib.BytesIO()
-    with zipfile.ZipFile(mem_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(DB_FILE)
-
-    mem_zip.seek(0)
-
-    await context.bot.send_document(
-        chat_id=backup_id,
-        document=InputFile(
-            mem_zip,
-            filename=f"backup_{datetime.now().strftime('%Y%m%d')}.zip"
-        ),
-        caption="📦 بکاپ اتوماتیک دیتابیس"
+    userdata = load_userdata()
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = update.effective_user.id in ADMIN_IDS or update.effective_user.id in sub_admins
+    
+    await update.message.reply_text(
+        "لغو شد.",
+        reply_markup=get_keyboard(current, is_admin)
     )
+    
+    return CHOOSING
 
 
 # ======== BUILD APPLICATION ========  ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ========
@@ -1465,13 +1493,6 @@ def build_application():
             not_started
         ),
         group=0
-    )
-
-    # ⏱ بکاپ اتوماتیک
-    application.job_queue.run_repeating(
-        send_daily_backup,
-        interval=8 * 60 * 60,
-        first=10
     )
 
     # ConversationHandler
