@@ -11,6 +11,7 @@ import os
 import io as iolib
 import uuid
 import zipfile
+import html
 from datetime import datetime
 from telegram import (
     Update,
@@ -346,7 +347,7 @@ def load_userdata():
         return {}
 
 
-def save_userdata(data):
+def save_userdata(data, upload=True):
     # ذخیره لوکال
     try:
         with open(USERDATA_FILE, "w", encoding="utf-8") as f:
@@ -358,16 +359,55 @@ def save_userdata(data):
         print("❌ Failed to save userdata locally:", e)
         return False
 
-    # ارسال به گروه تلگرام
-    return upload_userdata_to_telegram()
+    # ارسال به گروه تلگرام فقط وقتی لازم داریم
+    if upload:
+        return upload_userdata_to_telegram()
 
+    return True
 
-# فایل بکاپ روزانه، اگر در جای دیگری از کدت استفاده می‌شود
-BACKUP_FILE = "/tmp/backup_database.zip"
+def track_user_activity(update: Update, count_message=True):
+    """
+    ثبت اطلاعات کاربران داخل userdata:
+    - نام
+    - یوزرنیم
+    - آیدی عددی
+    - تعداد پیام‌ها / دستورها
+    - وضعیت بن
+    """
 
+    user = update.effective_user
+    if not user:
+        return
 
-# در انتها، مثل قبل:
-userdata = load_userdata()
+    user_id = str(user.id)
+
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+
+    old_data = users.get(user_id, {})
+    old_count = int(old_data.get("message_count", 0))
+
+    full_name = user.full_name or "بدون نام"
+    username = user.username
+
+    users[user_id] = {
+        "id": user.id,
+        "full_name": full_name,
+        "username": username,
+        "message_count": old_count + 1 if count_message else old_count,
+        "banned": bool(old_data.get("banned", False)),
+        "first_seen": old_data.get("first_seen") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    new_count = users[user_id]["message_count"]
+
+    # برای سبک شدن:
+    # هر پیام فقط لوکال ذخیره می‌شود.
+    # پیام اول و هر 10 پیام یک بار، بکاپ userdata هم در تلگرام آپلود می‌شود.
+    should_upload = (old_count == 0) or (new_count % 10 == 0)
+
+    save_userdata(userdata, upload=should_upload)
 
 #------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -502,7 +542,8 @@ def get_keyboard(node_id, is_admin):
 def get_admin_access_inline_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("👑 مدیریت ادمین‌ها", callback_data="admin_mgmt")
+            InlineKeyboardButton("👑 مدیریت ادمین‌ها", callback_data="admin_mgmt"),
+            InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")
         ],
         [
             InlineKeyboardButton("📤 دریافت userdata", callback_data="admin_get_userdata"),
@@ -512,7 +553,6 @@ def get_admin_access_inline_keyboard():
             InlineKeyboardButton("❌ بستن پنل", callback_data="admin_close")
         ]
     ])
-
 
 def get_admin_mgmt_inline_keyboard():
     return InlineKeyboardMarkup([
@@ -531,6 +571,15 @@ def get_admin_mgmt_inline_keyboard():
         ]
     ])
 
+def get_user_mgmt_inline_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 لیست کاربران", callback_data="admin_users_list")
+        ],
+        [
+            InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back_access")
+        ]
+    ])
 
 def get_admin_password_inline_keyboard():
     return InlineKeyboardMarkup([
@@ -631,6 +680,7 @@ async def not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=True)
     user_id = update.effective_user.id
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
@@ -683,7 +733,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.6)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.9)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -833,7 +883,21 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     
         return WAITING_REMOVE_ADMIN
-    
+
+    # ---------------- مدیریت کاربران ----------------
+    if data == "admin_users":
+        context.user_data["admin_panel"] = "users"
+
+        await query.message.edit_text(
+            "👥 مدیریت کاربران:",
+            reply_markup=get_user_mgmt_inline_keyboard()
+        )
+        return CHOOSING
+
+    # ---------------- لیست کاربران ----------------
+    if data == "admin_users_list":
+        return await list_users_inline(update, context)
+
     # ---------------- لیست ادمین‌ها ----------------
     if data == "admin_list":
         return await list_admins_inline(update, context)
@@ -905,6 +969,84 @@ async def list_admins_inline(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     return CHOOSING
 
+async def list_users_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    userdata = load_userdata()
+    users = userdata.get("users", {})
+
+    if not users:
+        await query.message.edit_text(
+            "📭 هنوز هیچ کاربری ثبت نشده است.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")
+                ]
+            ])
+        )
+        return CHOOSING
+
+    users_list = []
+
+    for user_id, data in users.items():
+        try:
+            count = int(data.get("message_count", 0))
+        except Exception:
+            count = 0
+
+        users_list.append({
+            "id": str(data.get("id", user_id)),
+            "full_name": data.get("full_name") or "بدون نام",
+            "username": data.get("username"),
+            "message_count": count,
+            "banned": bool(data.get("banned", False))
+        })
+
+    # مرتب‌سازی از بیشترین دستور به کمترین
+    users_list.sort(key=lambda x: x["message_count"], reverse=True)
+
+    msg = "👥 لیست کاربران ربات:\n\n"
+    msg += "نام | آیدی عددی | تعداد دستور | وضعیت\n"
+    msg += "━━━━━━━━━━━━━━\n"
+
+    for user in users_list:
+        uid = user["id"]
+        name = html.escape(user["full_name"])
+        username = user.get("username")
+        count = user["message_count"]
+        banned = user["banned"]
+
+        # ✅ یعنی آزاد / ❌ یعنی بن
+        status_icon = "❌" if banned else "✅"
+
+        # اگر یوزرنیم داشت، لینک t.me بده
+        # اگر نداشت، لینک مستقیم با tg://user?id
+        if username:
+            safe_username = html.escape(username.lstrip("@"))
+            name_link = f'<a href="https://t.me/{safe_username}">{name}</a>'
+        else:
+            name_link = f'<a href="tg://user?id={uid}">{name}</a>'
+
+        msg += f'{name_link} | <code>{uid}</code> | {count} دستور | {status_icon}\n'
+
+    # محدودیت پیام تلگرام حدود 4096 کاراکتر است
+    if len(msg) > 3900:
+        msg = msg[:3900] + "\n\n⚠️ لیست طولانی بود و کوتاه شد."
+
+    await query.message.edit_text(
+        msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")
+            ]
+        ])
+    )
+
+    return CHOOSING
+
+
 async def show_admin_access_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, text="🔐 پنل مدیریت:"):
     """
     اول ReplyKeyboard قبلی مثل ❌ لغو را حذف می‌کند،
@@ -943,6 +1085,7 @@ async def show_admin_mgmt_panel(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=True)
     text = update.message.text
     user_id = update.effective_user.id
     userdata = load_userdata()
@@ -987,24 +1130,22 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- 2. هندل کردن دستورات ادمین ---  --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین --- --- هندل کردن دستورات ادمین ---
 
     # --- Admin panel back handling ------------------------------------------------------------------------------------------
+    # --- Admin panel back handling ---
     if text == "🔙 بازگشت" and context.user_data.get("admin_panel"):
         panel = context.user_data["admin_panel"]
-    
-        if panel == "admin_mgmt":
+
+        if panel in ["admin_mgmt", "users"]:
             context.user_data["admin_panel"] = "access"
+
             await update.message.reply_text(
                 "🔐 پنل مدیریت:",
-                reply_markup=ReplyKeyboardMarkup([
-                    ["👑 مدیریت ادمین‌ها"],
-                    ["📤 دریافت userdata"],
-                    ["📥 وارد کردن userdata"],
-                    ["🔙 بازگشت"]
-                ], resize_keyboard=True)
+                reply_markup=get_admin_access_inline_keyboard()
             )
             return CHOOSING
-    
+
         if panel == "access":
-            context.user_data.pop("admin_panel")
+            context.user_data.pop("admin_panel", None)
+
             await update.message.reply_text(
                 "بازگشت به صفحه اصلی",
                 reply_markup=get_keyboard("root", is_admin)
