@@ -420,12 +420,6 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(parent_id, True)
     )
 
-# تابعی برای ساخت دکمه آبی (Primary)
-def create_blue_button(text):
-    btn = KeyboardButton(text=text)
-    # استفاده از primary برای اعمال رنگ اصلی تم
-    btn.text_button_appearance = {"type": "primary"}
-    return 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
 def get_keyboard(node_id, is_admin):
@@ -473,9 +467,15 @@ def get_keyboard(node_id, is_admin):
         keyboard.append(["↩️", "↪️"])
         #keyboard.append([os.getenv("ADMIN_ACCESSIBILITY_NAME")])
 
-
     # دکمه‌های بازگشت
     nav_row = []
+    # تابعی برای ساخت دکمه آبی (Primary)
+    def create_blue_button(text):
+        btn = KeyboardButton(text=text)
+        # استفاده از primary برای اعمال رنگ اصلی تم
+        btn.text_button_appearance = {"type": "primary"}
+        return btn
+        
     if node.get("parent"):
         nav_row.append(create_blue_button("🔙 بازگشت"))
     
