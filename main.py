@@ -424,49 +424,55 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def get_keyboard(node_id, is_admin):
     db = load_db()
     node = db.get(node_id)
-    
+
     if not node:
         return ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
 
     keyboard = []
-    
-    # --- بخش اصلاح شده دکمه‌های پوشه ---
+
     children_ids = node.get("children", [])
     row = []
+
     for child_id in children_ids:
         child_node = db.get(child_id)
-        btn_style = child_node.get("style") # مقدارش حالا positive, primary یا negative است
-        
-        # ساخت دکمه
-        button = KeyboardButton(text=child_node["name"])
-        
-        # اضافه کردن استایل با ساختار استاندارد تلگرام
-        if btn_style:
-            # تلگرام این فیلد را برای رنگ‌دهی می‌شناسد
-            button.text_button_appearance = {"type": btn_style}
-        
-        row.append(button)
-    # --- پایان بخش اصلاح شده ---
 
-    # دکمه‌های کنترلی ادمین
+        if child_node:
+            btn_style = child_node.get("style")
+
+            if btn_style:
+                button = KeyboardButton(
+                    text=child_node["name"],
+                    api_kwargs={"style": btn_style}
+                )
+            else:
+                button = KeyboardButton(text=child_node["name"])
+
+            row.append(button)
+
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+
+    if row:
+        keyboard.append(row)
+
     if is_admin:
-        # (کدهای بقیه دکمه‌ها را دقیقاً مثل قبل بگذار، تغییری نیاز ندارند)
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
         keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
 
-    # دکمه‌های بازگشت
     nav_row = []
-        
+
     if node.get("parent"):
         nav_row.append("🔙 بازگشت")
-    
+
     nav_row.append("🏠 صفحه اصلی")
     keyboard.append(nav_row)
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 # --- HELPER FUNCTIONS ---
 async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE, node_id: str):
