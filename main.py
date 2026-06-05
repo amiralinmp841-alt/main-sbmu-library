@@ -373,7 +373,7 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     styles = {
         "/blue": "primary",
         #"/blue": "secondary",
-        "/green" : "success"
+        "/green" : "success",
         "/red": "danger",
         "/none": None
     }
