@@ -430,39 +430,40 @@ def get_keyboard(node_id, is_admin):
 
     keyboard = []
     
+    # --- بخش اصلاح شده دکمه‌های پوشه ---
     children_ids = node.get("children", [])
     row = []
     for child_id in children_ids:
         child_node = db.get(child_id)
         if child_node:
+            # خواندن استایل از دیتابیس
             btn_style = child_node.get("style") 
             
-            # روش درست و رسمی در API 9.4:
-            # نیازی به api_kwargs نیست؛ از پارامتر text_button_appearance استفاده کن
-            appearance = {"type": btn_style} if btn_style else None
+            # ایجاد دکمه به روش استاندارد
+            button = KeyboardButton(text=child_node["name"])
             
-            button = KeyboardButton(
-                text=child_node["name"],
-                text_button_appearance=appearance
-            )
-
+            # اعمال رنگ به صورت ایمن (فقط اگر استایل وجود داشت)
+            if btn_style:
+                # این فیلد کاملاً استانداردِ API 9.4 است و "هنگ" ایجاد نمی‌کند
+                button.text_button_appearance = {"type": btn_style}
+            
             row.append(button)
+
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
     if row:
         keyboard.append(row)
-
     # --- پایان بخش اصلاح شده ---
 
     # دکمه‌های کنترلی ادمین
     if is_admin:
+        # (کدهای بقیه دکمه‌ها را دقیقاً مثل قبل بگذار، تغییری نیاز ندارند)
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
         keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
-        #keyboard.append([os.getenv("ADMIN_ACCESSIBILITY_NAME")])
 
     # دکمه‌های بازگشت
     nav_row = []
