@@ -840,7 +840,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.11)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.12)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -884,14 +884,16 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ---------------- بازگشت به پنل اصلی ----------------
     if data == "admin_back_access":
+        await remove_temp_reply_keyboard_from_callback(query)
+    
         context.user_data["admin_panel"] = "access"
-
+    
         await query.message.edit_text(
             "🔐 پنل مدیریت:",
             reply_markup=get_admin_access_inline_keyboard()
         )
         return CHOOSING
-
+    
     # ---------------- بستن پنل ----------------
     if data == "admin_close":
         context.user_data.pop("admin_panel", None)
@@ -993,14 +995,16 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ---------------- مدیریت کاربران ----------------
     if data == "admin_users":
+        await remove_temp_reply_keyboard_from_callback(query)
+    
         context.user_data["admin_panel"] = "users"
-
+    
         await query.message.edit_text(
             "👥 مدیریت کاربران:",
             reply_markup=get_user_mgmt_inline_keyboard()
         )
         return CHOOSING
-
+    
     # ---------------- لیست کاربران ----------------
     if data == "admin_users_list":
         return await list_users_inline(update, context)
@@ -1027,38 +1031,42 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if data.startswith("admin_ban_pick_"):
         target_user_id = int(data.split("_")[-1])
         ok, message = await ban_user_by_id(target_user_id, context)
-
+    
         await query.message.reply_text(
             message,
             parse_mode="HTML"
         )
-
+    
+        await remove_temp_reply_keyboard_from_callback(query)
+    
         await query.message.edit_text(
             "👥 مدیریت کاربران:",
             reply_markup=get_user_mgmt_inline_keyboard()
         )
-
+    
         context.user_data["admin_panel"] = "users"
         return CHOOSING
-
+    
     # ---------------- انتخاب کاربر برای خارج کردن از بن ----------------
     if data.startswith("admin_unban_pick_"):
         target_user_id = int(data.split("_")[-1])
         ok, message = await unban_user_by_id(target_user_id, context)
-
+    
         await query.message.reply_text(
             message,
             parse_mode="HTML"
         )
-
+    
+        await remove_temp_reply_keyboard_from_callback(query)
+    
         await query.message.edit_text(
             "👥 مدیریت کاربران:",
             reply_markup=get_user_mgmt_inline_keyboard()
         )
-
+    
         context.user_data["admin_panel"] = "users"
         return CHOOSING
-
+    
     # ---------------- لیست ادمین‌ها ----------------
     if data == "admin_list":
         return await list_admins_inline(update, context)
@@ -1466,6 +1474,19 @@ async def show_unban_users_page(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data["admin_panel"] = "users"
     return WAITING_UNBAN_USER
+
+async def remove_temp_reply_keyboard_from_callback(query, text="⌨️ کیبورد موقت بسته شد."):
+    """
+    برای زمانی که از داخل CallbackQuery می‌خواهیم
+    ReplyKeyboard موقت مثل «❌ لغو» را حذف کنیم.
+    """
+    try:
+        await query.message.reply_text(
+            text,
+            reply_markup=ReplyKeyboardRemove()
+        )
+    except Exception as e:
+        print("Failed to remove temp reply keyboard:", e)
 
 async def show_admin_access_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, text="🔐 پنل مدیریت:"):
     """
