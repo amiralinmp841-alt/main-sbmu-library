@@ -592,6 +592,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = args[0]
 
         if target_id in db:
+            target_node = db[target_id]
+            has_children = bool(target_node.get("children"))
+
+            # 👤 کاربر عادی + نود بدون فرزند => فقط محتوا نمایش بده
+            if not is_admin and not has_children:
+                parent_id = target_node.get("parent") or "root"
+                context.user_data["current_node"] = parent_id
+
+                path_text = get_node_path_text(db, target_id)
+
+                await update.message.reply_text(
+                    f"📂 مسیر:\n{path_text}",
+                    reply_markup=get_keyboard(parent_id, is_admin)
+                )
+
+                await send_node_contents(update, context, target_id)
+                return CHOOSING
+
+            # 👑 ادمین، یا نودی که فرزند دارد => خود پوشه باز شود
             context.user_data["current_node"] = target_id
 
             path_text = get_node_path_text(db, target_id)
@@ -608,12 +627,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.26)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.2)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
     return CHOOSING
-    
+
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
