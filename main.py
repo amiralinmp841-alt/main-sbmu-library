@@ -469,17 +469,11 @@ def get_keyboard(node_id, is_admin):
 
     # دکمه‌های بازگشت
     nav_row = []
-    # تابعی برای ساخت دکمه آبی (Primary)
-    def create_blue_button(text):
-        btn = KeyboardButton(text=text)
-        # استفاده از primary برای اعمال رنگ اصلی تم
-        btn.text_button_appearance = {"type": "primary"}
-        return btn
         
     if node.get("parent"):
-        nav_row.append(create_blue_button("🔙 بازگشت"))
+        nav_row.append("🔙 بازگشت")
     
-    nav_row.append(create_blue_button("🏠 صفحه اصلی"))
+    nav_row.append("🏠 صفحه اصلی")
     keyboard.append(nav_row)
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
