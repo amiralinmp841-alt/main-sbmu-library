@@ -532,7 +532,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.18)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.19)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
