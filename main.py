@@ -487,6 +487,44 @@ def get_keyboard(node_id, is_admin):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # --- HELPER FUNCTIONS ---
+def get_node_path_text(db, node_id, separator=" ⬅️ "):
+    """
+    مسیر کامل یک نود را از ریشه تا خودش می‌سازد.
+    مثال:
+    ترم 1 ⬅️ آناتومی اندام ⬅️ عملی ⬅️ جلسه اول
+    """
+
+    if node_id not in db:
+        return "مسیر نامشخص"
+
+    path = []
+    current_id = node_id
+    visited = set()
+
+    while current_id and current_id in db:
+        # جلوگیری از حلقه بی‌نهایت اگر دیتابیس خراب شده باشد
+        if current_id in visited:
+            break
+
+        visited.add(current_id)
+
+        node = db[current_id]
+
+        # root را داخل مسیر نشان نده
+        if current_id != "root":
+            path.append(node.get("name", "بدون نام"))
+
+        current_id = node.get("parent")
+
+    # چون از پایین به بالا جمع کردیم، باید برعکس شود
+    path.reverse()
+
+    if not path:
+        return db.get("root", {}).get("name", "خانه")
+
+    return separator.join(path)
+
+
 async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE, node_id: str):
     """محتواهای موجود در نود فعلی را ارسال می‌کند"""
     db = load_db()
@@ -556,8 +594,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target_id in db:
             context.user_data["current_node"] = target_id
 
+            path_text = get_node_path_text(db, target_id)
+
             await update.message.reply_text(
-                f"📂 {db[target_id]['name']}",
+                f"📂 مسیر:\n{path_text}",
                 reply_markup=get_keyboard(target_id, is_admin)
             )
 
@@ -568,12 +608,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.25)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.26)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
     return CHOOSING
-
+    
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
