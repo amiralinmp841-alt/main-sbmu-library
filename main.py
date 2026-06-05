@@ -374,7 +374,6 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/blue": "primary",
         "/green": "success",
         "/red": "danger",
-        "/who": "warning",
         "/none": None
     }
 
@@ -412,7 +411,6 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/green": "سبز",
         "/blue": "آبی",
         "/red": "قرمز",
-        "/who": "ffffff",
         "/none": "بدون رنگ"
     }
 
@@ -560,7 +558,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.23)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.24)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -1567,7 +1565,6 @@ def build_application():
     application.add_handler(CommandHandler("blue", set_node_style), group=0)
     application.add_handler(CommandHandler("red", set_node_style), group=0)
     application.add_handler(CommandHandler("none", set_node_style), group=0)
-    application.add_handler(CommandHandler("who", set_node_style), group=0)
 
     # 🔔 پیام‌های بدون /start → not_started
     application.add_handler(
