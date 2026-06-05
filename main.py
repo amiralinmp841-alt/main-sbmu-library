@@ -359,42 +359,65 @@ BACKUP_FILE = "/tmp/backup_database.zip"
 userdata = load_userdata()
 
 #------ دکمه های رنگی ----------
+#------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     userdata = load_userdata()
+
     is_admin = (user_id in ADMIN_IDS) or (user_id in userdata.get("sub_admins", []))
-    
+
     if not is_admin:
         return
 
-    command = update.message.text.lower()
-    current_node_id = context.user_data.get('current_node', 'root')
-    
-    if current_node_id == 'root':
-        await update.message.reply_text("❌ امکان تغییر رنگ صفحه اصلی وجود ندارد.")
-        return
+    command = update.message.text.lower().split()[0]
 
-    # نقشه‌برداری دستورات به استایل‌های تلگرام
     styles = {
         "/green": "primary",
         "/blue": "secondary",
         "/red": "danger",
         "/none": None
     }
-    
-    new_style = styles.get(command.split()[0])
-    
+
+    if command not in styles:
+        await update.message.reply_text("❌ دستور رنگ نامعتبر است.")
+        return
+
+    current_node_id = context.user_data.get("current_node", "root")
+
+    if current_node_id == "root":
+        await update.message.reply_text("❌ امکان تغییر رنگ صفحه اصلی وجود ندارد.")
+        return
+
     db = load_db()
-    push_admin_history(context, db) # ثبت در تاریخچه برای قابلیت Undo
-    
-    db[current_node_id]["style"] = new_style
+
+    if current_node_id not in db:
+        await update.message.reply_text("❌ پوشه فعلی در دیتابیس پیدا نشد.")
+        return
+
+    push_admin_history(context, db)
+
+    new_style = styles[command]
+
+    if new_style is None:
+        db[current_node_id].pop("style", None)
+    else:
+        db[current_node_id]["style"] = new_style
+
     save_db(db)
-    
-    color_name = command.replace("/", "")
+
+    parent_id = db[current_node_id].get("parent", "root")
+    context.user_data["current_node"] = parent_id
+
+    color_names = {
+        "/green": "سبز",
+        "/blue": "آبی",
+        "/red": "قرمز",
+        "/none": "بدون رنگ"
+    }
+
     await update.message.reply_text(
-        f"✅ رنگ این پوشه به {color_name} تغییر یافت.\n"
-        f"تغییرات در منوی قبلی (والد) قابل مشاهده است.",
-        reply_markup=get_keyboard(current_node_id, True)
+        f"✅ رنگ این پوشه به «{color_names[command]}» تغییر یافت.",
+        reply_markup=get_keyboard(parent_id, True)
     )
 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
@@ -418,11 +441,16 @@ def get_keyboard(node_id, is_admin):
             btn_style = child_node.get("style") 
             
             # ساخت دکمه با استایل
-            button = KeyboardButton(text=child_node["name"])
             if btn_style:
-                button.style = btn_style # اعمال استایل (primary/secondary/danger)
-                
+                button = KeyboardButton(
+                    text=child_node["name"],
+                    api_kwargs={"style": btn_style}
+                )
+            else:
+                button = KeyboardButton(text=child_node["name"])
+
             row.append(button)
+
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
