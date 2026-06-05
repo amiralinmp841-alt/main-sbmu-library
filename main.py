@@ -120,9 +120,10 @@ logging.basicConfig(
     WAITING_ADMIN_PASSWORD_EDIT,
     WAITING_USERDATA_UPLOAD,
     WAITING_ADD_ADMIN,
-    WAITING_REMOVE_ADMIN
-) = range(9)
-
+    WAITING_REMOVE_ADMIN,
+    WAITING_BAN_USER,
+    WAITING_UNBAN_USER
+) = range(11)
 
 # ============ TELEGRAM USER API BACKUP CONFIG ============
 
@@ -409,6 +410,98 @@ def track_user_activity(update: Update, count_message=True):
 
     save_userdata(userdata, upload=should_upload)
 
+def is_user_banned(user_id: int) -> bool:
+    userdata = load_userdata()
+    user_data = userdata.get("users", {}).get(str(user_id), {})
+    return bool(user_data.get("banned", False))
+
+
+def get_sorted_users_for_management(filter_mode="all"):
+    """
+    filter_mode:
+      - all
+      - banned
+      - not_banned
+    """
+    userdata = load_userdata()
+    users = userdata.get("users", {})
+
+    result = []
+
+    for user_id, data in users.items():
+        try:
+            count = int(data.get("message_count", 0))
+        except Exception:
+            count = 0
+
+        item = {
+            "id": int(data.get("id", user_id)),
+            "full_name": data.get("full_name") or "بدون نام",
+            "username": data.get("username"),
+            "message_count": count,
+            "banned": bool(data.get("banned", False))
+        }
+
+        if filter_mode == "banned" and not item["banned"]:
+            continue
+        if filter_mode == "not_banned" and item["banned"]:
+            continue
+
+        result.append(item)
+
+    result.sort(key=lambda x: x["message_count"], reverse=True)
+    return result
+
+
+def build_user_action_keyboard(users_list, action="ban", page=0, page_size=8):
+    """
+    action = ban | unban
+    """
+    total = len(users_list)
+    start = page * page_size
+    end = start + page_size
+    page_users = users_list[start:end]
+
+    keyboard = []
+
+    row = []
+    for user in page_users:
+        name = user["full_name"][:20]
+        prefix = "🚫" if action == "ban" else "✅"
+        row.append(
+            InlineKeyboardButton(
+                f"{prefix} {name}",
+                callback_data=f"admin_{action}_pick_{user['id']}"
+            )
+        )
+
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton("⬅️ صفحه قبل", callback_data=f"admin_{action}_page_{page-1}")
+        )
+
+    if end < total:
+        nav_row.append(
+            InlineKeyboardButton("➡️ صفحه بعد", callback_data=f"admin_{action}_page_{page+1}")
+        )
+
+    if nav_row:
+        keyboard.append(nav_row)
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
 #------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -577,6 +670,10 @@ def get_user_mgmt_inline_keyboard():
             InlineKeyboardButton("📋 لیست کاربران", callback_data="admin_users_list")
         ],
         [
+            InlineKeyboardButton("🚫 بن کردن کاربر", callback_data="admin_users_ban"),
+            InlineKeyboardButton("✅ خارج کردن از بن", callback_data="admin_users_unban")
+        ],
+        [
             InlineKeyboardButton("🔙 بازگشت", callback_data="admin_back_access")
         ]
     ])
@@ -663,16 +760,20 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 # --- HANDLERS ---
 async def not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
     text = update.message.text
-
     # ✅ اگر start هست (با payload یا بدون payload)، دخالت نکن
     if text.startswith("/start"):
         return
-
     # اگر قبلاً استارت کرده، دخالت نکن
     if "current_node" in context.user_data:
         return
-
     await update.message.reply_text(
         "♻️ ربات بروزرسانی شده است.\n"
         "برای ادامه لطفاً دستور /start را بزنید."
@@ -682,6 +783,12 @@ async def not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=True)
     user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
@@ -733,7 +840,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.9)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.11)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -898,6 +1005,60 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if data == "admin_users_list":
         return await list_users_inline(update, context)
 
+    # ---------------- پنل بن کاربران ----------------
+    if data == "admin_users_ban":
+        return await show_ban_users_page(update, context, page=0)
+
+    # ---------------- پنل خارج کردن از بن ----------------
+    if data == "admin_users_unban":
+        return await show_unban_users_page(update, context, page=0)
+
+    # ---------------- صفحه‌بندی بن ----------------
+    if data.startswith("admin_ban_page_"):
+        page = int(data.split("_")[-1])
+        return await show_ban_users_page(update, context, page=page)
+
+    # ---------------- صفحه‌بندی آن‌بن ----------------
+    if data.startswith("admin_unban_page_"):
+        page = int(data.split("_")[-1])
+        return await show_unban_users_page(update, context, page=page)
+
+    # ---------------- انتخاب کاربر برای بن ----------------
+    if data.startswith("admin_ban_pick_"):
+        target_user_id = int(data.split("_")[-1])
+        ok, message = await ban_user_by_id(target_user_id, context)
+
+        await query.message.reply_text(
+            message,
+            parse_mode="HTML"
+        )
+
+        await query.message.edit_text(
+            "👥 مدیریت کاربران:",
+            reply_markup=get_user_mgmt_inline_keyboard()
+        )
+
+        context.user_data["admin_panel"] = "users"
+        return CHOOSING
+
+    # ---------------- انتخاب کاربر برای خارج کردن از بن ----------------
+    if data.startswith("admin_unban_pick_"):
+        target_user_id = int(data.split("_")[-1])
+        ok, message = await unban_user_by_id(target_user_id, context)
+
+        await query.message.reply_text(
+            message,
+            parse_mode="HTML"
+        )
+
+        await query.message.edit_text(
+            "👥 مدیریت کاربران:",
+            reply_markup=get_user_mgmt_inline_keyboard()
+        )
+
+        context.user_data["admin_panel"] = "users"
+        return CHOOSING
+
     # ---------------- لیست ادمین‌ها ----------------
     if data == "admin_list":
         return await list_admins_inline(update, context)
@@ -1046,6 +1207,265 @@ async def list_users_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return CHOOSING
 
+async def show_ban_users_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+    query = update.callback_query
+
+    users_list = get_sorted_users_for_management(filter_mode="not_banned")
+
+    if not users_list:
+        await query.message.edit_text(
+            "📭 هیچ کاربر آزادی برای بن کردن وجود ندارد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")]
+            ])
+        )
+        return CHOOSING
+
+    page_size = 8
+    total_pages = (len(users_list) + page_size - 1) // page_size
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start = page * page_size
+    end = start + page_size
+    page_users = users_list[start:end]
+
+    msg = "🚫 انتخاب کاربر برای بن:\n\n"
+    msg += "روی دکمه نام کاربر بزنید یا آیدی عددی او را ارسال کنید.\n\n"
+    msg += "نام | آیدی | تعداد دستور\n"
+    msg += "━━━━━━━━━━━━━━\n"
+
+    for user in page_users:
+        uid = user["id"]
+        name = html.escape(user["full_name"])
+        username = user.get("username")
+        count = user["message_count"]
+
+        if username:
+            safe_username = html.escape(username.lstrip("@"))
+            name_link = f'<a href="https://t.me/{safe_username}">{name}</a>'
+        else:
+            name_link = f'<a href="tg://user?id={uid}">{name}</a>'
+
+        msg += f"{name_link} | <code>{uid}</code> | {count}\n"
+
+    msg += f"\n📄 صفحه {page + 1} از {total_pages}"
+
+    await query.message.edit_text(
+        msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=build_user_action_keyboard(users_list, action="ban", page=page, page_size=page_size)
+    )
+
+    await query.message.reply_text(
+        "📝 اگر خواستی دستی انتخاب کنی، آیدی عددی کاربر را بفرست.\nیا روی یکی از دکمه‌های بالا بزن.",
+        reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
+    )
+
+    context.user_data["admin_panel"] = "users"
+    return WAITING_BAN_USER
+
+async def ban_user_by_id(target_user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    if target_user_id in ADMIN_IDS:
+        return False, "❌ نمی‌توان ادمین اصلی را بن کرد."
+
+    userdata = load_userdata()
+    sub_admins = [int(x) for x in userdata.get("sub_admins", [])]
+
+    if target_user_id in sub_admins:
+        return False, "❌ نمی‌توان ادمین فرعی را بن کرد."
+
+    users = userdata.setdefault("users", {})
+    target_key = str(target_user_id)
+
+    if target_key not in users:
+        return False, "❌ این کاربر در لیست کاربران ثبت نشده است."
+
+    if users[target_key].get("banned", False):
+        return False, "⚠️ این کاربر از قبل بن شده است."
+
+    users[target_key]["banned"] = True
+    users[target_key]["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_userdata(userdata, upload=True)
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="⛔️ شما از ربات بن شدید و دیگر امکان استفاده از ربات را ندارید."
+        )
+    except Exception as e:
+        print("Failed to notify banned user:", e)
+
+    return True, f"✅ کاربر <code>{target_user_id}</code> با موفقیت بن شد."
+
+async def receive_ban_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "❌ لغو":
+        await update.message.reply_text(
+            "❌ عملیات لغو شد.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await update.message.reply_text(
+            "👥 مدیریت کاربران:",
+            reply_markup=get_user_mgmt_inline_keyboard()
+        )
+        context.user_data["admin_panel"] = "users"
+        return CHOOSING
+
+    target_user_id = ensure_numeric_id(text)
+    if target_user_id is None:
+        await update.message.reply_text("❌ فقط آیدی عددی معتبر بفرستید یا روی دکمه‌های اینلاین بزنید.")
+        return WAITING_BAN_USER
+
+    ok, message = await ban_user_by_id(target_user_id, context)
+
+    await update.message.reply_text(
+        message,
+        parse_mode="HTML"
+    )
+
+    await update.message.reply_text(
+        "👥 مدیریت کاربران:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await update.message.reply_text(
+        "👥 مدیریت کاربران:",
+        reply_markup=get_user_mgmt_inline_keyboard()
+    )
+
+    context.user_data["admin_panel"] = "users"
+    return CHOOSING
+
+async def receive_unban_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "❌ لغو":
+        await update.message.reply_text(
+            "❌ عملیات لغو شد.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await update.message.reply_text(
+            "👥 مدیریت کاربران:",
+            reply_markup=get_user_mgmt_inline_keyboard()
+        )
+        context.user_data["admin_panel"] = "users"
+        return CHOOSING
+
+    target_user_id = ensure_numeric_id(text)
+    if target_user_id is None:
+        await update.message.reply_text("❌ فقط آیدی عددی معتبر بفرستید یا روی دکمه‌های اینلاین بزنید.")
+        return WAITING_UNBAN_USER
+
+    ok, message = await unban_user_by_id(target_user_id, context)
+
+    await update.message.reply_text(
+        message,
+        parse_mode="HTML"
+    )
+
+    await update.message.reply_text(
+        "👥 مدیریت کاربران:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await update.message.reply_text(
+        "👥 مدیریت کاربران:",
+        reply_markup=get_user_mgmt_inline_keyboard()
+    )
+
+    context.user_data["admin_panel"] = "users"
+    return CHOOSING
+
+async def unban_user_by_id(target_user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+    target_key = str(target_user_id)
+
+    if target_key not in users:
+        return False, "❌ این کاربر در لیست کاربران ثبت نشده است."
+
+    if not users[target_key].get("banned", False):
+        return False, "⚠️ این کاربر بن نیست."
+
+    users[target_key]["banned"] = False
+    users[target_key]["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_userdata(userdata, upload=True)
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="✅ شما از بن خارج شدید و دوباره می‌توانید از ربات استفاده کنید."
+        )
+    except Exception as e:
+        print("Failed to notify unbanned user:", e)
+
+    return True, f"✅ کاربر <code>{target_user_id}</code> از بن خارج شد."
+
+async def show_unban_users_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+    query = update.callback_query
+
+    users_list = get_sorted_users_for_management(filter_mode="banned")
+
+    if not users_list:
+        await query.message.edit_text(
+            "📭 هیچ کاربر بن‌شده‌ای وجود ندارد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")]
+            ])
+        )
+        return CHOOSING
+
+    page_size = 8
+    total_pages = (len(users_list) + page_size - 1) // page_size
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start = page * page_size
+    end = start + page_size
+    page_users = users_list[start:end]
+
+    msg = "✅ انتخاب کاربر برای خارج کردن از بن:\n\n"
+    msg += "روی دکمه نام کاربر بزنید یا آیدی عددی او را ارسال کنید.\n\n"
+    msg += "نام | آیدی | تعداد دستور\n"
+    msg += "━━━━━━━━━━━━━━\n"
+
+    for user in page_users:
+        uid = user["id"]
+        name = html.escape(user["full_name"])
+        username = user.get("username")
+        count = user["message_count"]
+
+        if username:
+            safe_username = html.escape(username.lstrip("@"))
+            name_link = f'<a href="https://t.me/{safe_username}">{name}</a>'
+        else:
+            name_link = f'<a href="tg://user?id={uid}">{name}</a>'
+
+        msg += f"{name_link} | <code>{uid}</code> | {count}\n"
+
+    msg += f"\n📄 صفحه {page + 1} از {total_pages}"
+
+    await query.message.edit_text(
+        msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=build_user_action_keyboard(users_list, action="unban", page=page, page_size=page_size)
+    )
+
+    await query.message.reply_text(
+        "📝 اگر خواستی دستی انتخاب کنی، آیدی عددی کاربر را بفرست.\nیا روی یکی از دکمه‌های بالا بزن.",
+        reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
+    )
+
+    context.user_data["admin_panel"] = "users"
+    return WAITING_UNBAN_USER
 
 async def show_admin_access_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, text="🔐 پنل مدیریت:"):
     """
@@ -1088,6 +1508,12 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=True)
     text = update.message.text
     user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
     userdata = load_userdata()
     sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
@@ -2092,6 +2518,14 @@ def build_application():
             ],
             WAITING_REMOVE_ADMIN: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), remove_sub_admin)
+            ],
+            WAITING_BAN_USER: [
+                CallbackQueryHandler(admin_inline_handler, pattern="^admin_"),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_ban_user_id)
+            ],
+            WAITING_UNBAN_USER: [
+                CallbackQueryHandler(admin_inline_handler, pattern="^admin_"),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_unban_user_id)
             ]
         },
         fallbacks=[CommandHandler('start', start)]
