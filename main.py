@@ -371,8 +371,9 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = update.message.text.lower().split()[0]
 
     styles = {
-        "/green": "primary",
-        "/blue": "secondary",
+        "/blue": "primary",
+        #"/blue": "secondary",
+        "/green" : "success"
         "/red": "danger",
         "/none": None
     }
@@ -558,7 +559,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.20)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.22)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
