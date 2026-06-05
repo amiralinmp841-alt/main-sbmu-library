@@ -425,7 +425,7 @@ def create_blue_button(text):
     btn = KeyboardButton(text=text)
     # استفاده از primary برای اعمال رنگ اصلی تم
     btn.text_button_appearance = {"type": "primary"}
-    return btn
+    return 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
 def get_keyboard(node_id, is_admin):
