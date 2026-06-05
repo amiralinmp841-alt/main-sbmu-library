@@ -15,6 +15,7 @@ from datetime import datetime
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     KeyboardButton,
     InputFile,
     InlineKeyboardButton,
@@ -682,7 +683,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.5)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.6)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -737,14 +738,21 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ---------------- بستن پنل ----------------
     if data == "admin_close":
         context.user_data.pop("admin_panel", None)
-
+    
+        current = context.user_data.get("current_node", "root")
+    
         try:
             await query.message.delete()
         except:
             await query.message.edit_text("✅ پنل بسته شد.")
-
+    
+        await query.message.reply_text(
+            "✅ پنل بسته شد.",
+            reply_markup=get_keyboard(current, is_admin)
+        )
+    
         return CHOOSING
-
+    
     # ---------------- دریافت userdata ----------------
     if data == "admin_get_userdata":
         userdata = load_userdata()
@@ -772,13 +780,15 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ---------------- وارد کردن userdata ----------------
     if data == "admin_import_userdata":
+        context.user_data["admin_waiting_from"] = "access"
+    
         await query.message.reply_text(
             "📥 فایل .userdata.zip را ارسال کنید:",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
         )
-
+    
         return WAITING_USERDATA_UPLOAD
-
+    
     # ---------------- نمایش رمز ادمینی ----------------
     if data == "admin_password":
         admin_pass = userdata.get("admin_password", "تعریف نشده")
@@ -793,6 +803,8 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ---------------- ویرایش رمز ادمینی ----------------
     if data == "admin_edit_password":
+        context.user_data["admin_waiting_from"] = "admin_mgmt"
+    
         await query.message.reply_text(
             "✏️ رمز جدید ادمینی را ارسال کنید:",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
@@ -802,22 +814,26 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ---------------- افزودن ادمین ----------------
     if data == "admin_add_sub":
+        context.user_data["admin_waiting_from"] = "admin_mgmt"
+    
         await query.message.reply_text(
             "📝 آیدی عددی فرد مورد نظر را ارسال کنید:",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
         )
-
+    
         return WAITING_ADD_ADMIN
 
     # ---------------- حذف ادمین ----------------
     if data == "admin_remove_sub":
+        context.user_data["admin_waiting_from"] = "admin_mgmt"
+    
         await query.message.reply_text(
             "📝 آیدی عددی ادمینی که می‌خواهید حذف کنید را ارسال کنید:",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
         )
-
+    
         return WAITING_REMOVE_ADMIN
-
+    
     # ---------------- لیست ادمین‌ها ----------------
     if data == "admin_list":
         return await list_admins_inline(update, context)
@@ -888,6 +904,43 @@ async def list_admins_inline(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     return CHOOSING
+
+async def show_admin_access_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, text="🔐 پنل مدیریت:"):
+    """
+    اول ReplyKeyboard قبلی مثل ❌ لغو را حذف می‌کند،
+    بعد پنل اصلی ادمین را به صورت Inline نشان می‌دهد.
+    """
+    await update.message.reply_text(
+        "⌨️ کیبورد موقت بسته شد.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=get_admin_access_inline_keyboard()
+    )
+
+    context.user_data["admin_panel"] = "access"
+    return CHOOSING
+
+async def show_admin_mgmt_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, text="👑 مدیریت ادمین‌ها:"):
+    """
+    اول ReplyKeyboard قبلی مثل ❌ لغو را حذف می‌کند،
+    بعد پنل مدیریت ادمین‌ها را به صورت Inline نشان می‌دهد.
+    """
+    await update.message.reply_text(
+        "⌨️ کیبورد موقت بسته شد.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=get_admin_mgmt_inline_keyboard()
+    )
+
+    context.user_data["admin_panel"] = "admin_mgmt"
+    return CHOOSING
+
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -983,14 +1036,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_admin_access_inline_keyboard()
         )
     
-        return CHOOSING
-
-    # --- Admin Management ---
-    if text == "❌ لغو":
-        await update.message.reply_text(
-            "❌ عملیات لغو شد.",
-            reply_markup=get_keyboard("admin_mgmt", True)
-        )
         return CHOOSING
     
     # ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ===
@@ -1314,18 +1359,22 @@ async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # ❌ اگر کاربر منصرف شد
     if text in ["🔙 بازگشت", "❌ لغو"]:
+        context.user_data.pop("admin_waiting_from", None)
+    
         await update.message.reply_text(
-            "لغو شد.",
-            reply_markup=ReplyKeyboardMarkup([
-                ["👑 مدیریت ادمین‌ها"],
-                ["📤 دریافت userdata"],
-                ["📥 وارد کردن userdata"],
-                ["🔙 بازگشت"]
-            ], resize_keyboard=True)
+            "❌ عملیات لغو شد.",
+            reply_markup=ReplyKeyboardRemove()
         )
+    
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
+            reply_markup=get_admin_mgmt_inline_keyboard()
+        )
+    
+        context.user_data["admin_panel"] = "admin_mgmt"
         return CHOOSING
 
-    if len(text) < 4:
+    if len(text) < 2:
         await update.message.reply_text("❌ رمز خیلی کوتاه است.")
         return WAITING_ADMIN_PASSWORD_EDIT
 
@@ -1333,29 +1382,42 @@ async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE)
     userdata["admin_password"] = text
     save_userdata(userdata)
 
+    context.user_data.pop("admin_waiting_from", None)
+    
     await update.message.reply_text(
         "✅ رمز ادمینی با موفقیت تغییر کرد.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    await update.message.reply_text(
+        "👑 مدیریت ادمین‌ها:",
         reply_markup=get_admin_mgmt_inline_keyboard()
     )
+    
+    context.user_data["admin_panel"] = "admin_mgmt"
     return CHOOSING
-
+    
 async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     text = update.message.text
 
     if text in ["❌ لغو", "🔙 بازگشت"]:
+        context.user_data.pop("admin_waiting_from", None)
+    
         await update.message.reply_text(
             "❌ عملیات لغو شد.",
-            reply_markup=ReplyKeyboardMarkup([
-                ["👑 مدیریت ادمین‌ها"],
-                ["📤 دریافت userdata"],
-                ["📥 وارد کردن userdata"],
-                ["🔙 بازگشت"]
-            ], resize_keyboard=True)
+            reply_markup=ReplyKeyboardRemove()
         )
+    
+        await update.message.reply_text(
+            "🔐 پنل مدیریت:",
+            reply_markup=get_admin_access_inline_keyboard()
+        )
+    
+        context.user_data["admin_panel"] = "access"
         return CHOOSING
-
+    
     # بقیه کد ریستور userdata که قبلاً نوشته بودیم
 
     doc = update.message.document
@@ -1376,14 +1438,25 @@ async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_userdata(userdata)
 
+        context.user_data.pop("admin_waiting_from", None)
+        
         await update.message.reply_text(
             "✅ userdata با موفقیت بازیابی شد",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        await update.message.reply_text(
+            "🔐 پنل مدیریت:",
             reply_markup=get_admin_access_inline_keyboard()
         )
         
-        context.user_data["current_node"] = "admin_mgmt"
+        context.user_data["admin_panel"] = "access"
+        
+        # current_node را دست نزن؛ اگر نبود، root بگذار
+        context.user_data.setdefault("current_node", "root")
+        
         return CHOOSING
-
+        
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در بازیابی:\n{e}")
         return WAITING_USERDATA_UPLOAD
@@ -1398,12 +1471,21 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if text == "❌ لغو":
+        context.user_data.pop("admin_waiting_from", None)
+    
         await update.message.reply_text(
             "❌ عملیات لغو شد.",
-            reply_markup=get_keyboard("admin_mgmt", True)
+            reply_markup=ReplyKeyboardRemove()
         )
+    
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
+            reply_markup=get_admin_mgmt_inline_keyboard()
+        )
+    
+        context.user_data["admin_panel"] = "admin_mgmt"
         return CHOOSING
-
+    
     new_admin = ensure_numeric_id(text)
     if new_admin is None:
         await update.message.reply_text("❌ فقط آیدی عددی معتبر است. دوباره وارد کنید:")
@@ -1428,10 +1510,20 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_userdata(userdata)
 
+        context.user_data.pop("admin_waiting_from", None)
+        
         await update.message.reply_text(
             f"✅ ادمین {new_admin} با موفقیت اضافه شد.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
             reply_markup=get_admin_mgmt_inline_keyboard()
         )
+        
+        context.user_data["admin_panel"] = "admin_mgmt"
+        
         # 📩 ارسال پیام به ادمین جدید
         try:
             await context.bot.send_message(
@@ -1449,12 +1541,21 @@ async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if text == "❌ لغو":
+        context.user_data.pop("admin_waiting_from", None)
+    
         await update.message.reply_text(
             "❌ عملیات لغو شد.",
-            reply_markup=get_keyboard("admin_mgmt", True)
+            reply_markup=ReplyKeyboardRemove()
         )
+    
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
+            reply_markup=get_admin_mgmt_inline_keyboard()
+        )
+    
+        context.user_data["admin_panel"] = "admin_mgmt"
         return CHOOSING
-
+    
     admin_id = ensure_numeric_id(text)
     if admin_id is None:
         await update.message.reply_text("❌ فقط آیدی عددی معتبر است. دوباره ارسال کنید:")
@@ -1477,10 +1578,19 @@ async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         save_userdata(userdata)
 
+        context.user_data.pop("admin_waiting_from", None)
+        
         await update.message.reply_text(
             f"✅ ادمین {admin_id} حذف شد.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        await update.message.reply_text(
+            "👑 مدیریت ادمین‌ها:",
             reply_markup=get_admin_mgmt_inline_keyboard()
         )
+        
+        context.user_data["admin_panel"] = "admin_mgmt"
         
         # 📩 ارسال پیام به کاربر حذف‌شده
         try:
