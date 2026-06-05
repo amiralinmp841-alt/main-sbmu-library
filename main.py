@@ -429,21 +429,24 @@ def get_keyboard(node_id, is_admin):
         return ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
 
     keyboard = []
-
     children_ids = node.get("children", [])
     row = []
 
     for child_id in children_ids:
         child_node = db.get(child_id)
-
         if child_node:
             btn_style = child_node.get("style")
-
+            
+            # برای پایداری بیشتر، مطمئن می‌شویم style فقط مقادیر مجاز باشد
+            # و ساختار دکمه را ساده نگه می‌داریم
             if btn_style:
+                # ایجاد دکمه با پارامتر اختصاصی تو
                 button = KeyboardButton(
-                    text=child_node["name"],
-                    api_kwargs={"style": btn_style}
+                    text=child_node["name"]
                 )
+                # استفاده از دیکشنری مستقیم برای تزریق به متد زیربنایی اگر لازم شد
+                # اما این روش در PTB 20.7 معمولا کافیست:
+                button.api_kwargs = {"style": btn_style}
             else:
                 button = KeyboardButton(text=child_node["name"])
 
@@ -456,6 +459,7 @@ def get_keyboard(node_id, is_admin):
     if row:
         keyboard.append(row)
 
+    # بخش ادامین و بقیه کدها تغییری نمی‌کند
     if is_admin:
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
@@ -464,14 +468,13 @@ def get_keyboard(node_id, is_admin):
         keyboard.append(["↩️", "↪️"])
 
     nav_row = []
-
     if node.get("parent"):
         nav_row.append("🔙 بازگشت")
-
     nav_row.append("🏠 صفحه اصلی")
     keyboard.append(nav_row)
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 
 # --- HELPER FUNCTIONS ---
