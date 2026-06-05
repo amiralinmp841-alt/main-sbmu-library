@@ -435,25 +435,17 @@ def get_keyboard(node_id, is_admin):
     row = []
     for child_id in children_ids:
         child_node = db.get(child_id)
-        if child_node:
-            # خواندن استایل از دیتابیس
-            btn_style = child_node.get("style") 
-            
-            # ایجاد دکمه به روش استاندارد
-            button = KeyboardButton(text=child_node["name"])
-            
-            # اعمال رنگ به صورت ایمن (فقط اگر استایل وجود داشت)
-            if btn_style:
-                # این فیلد کاملاً استانداردِ API 9.4 است و "هنگ" ایجاد نمی‌کند
-                button.text_button_appearance = {"type": btn_style}
-            
-            row.append(button)
-
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-    if row:
-        keyboard.append(row)
+        btn_style = child_node.get("style") # مقدارش حالا positive, primary یا negative است
+        
+        # ساخت دکمه
+        button = KeyboardButton(text=child_node["name"])
+        
+        # اضافه کردن استایل با ساختار استاندارد تلگرام
+        if btn_style:
+            # تلگرام این فیلد را برای رنگ‌دهی می‌شناسد
+            button.text_button_appearance = {"type": btn_style}
+        
+        row.append(button)
     # --- پایان بخش اصلاح شده ---
 
     # دکمه‌های کنترلی ادمین
