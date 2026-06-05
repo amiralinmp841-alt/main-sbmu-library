@@ -421,7 +421,6 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
-
 def get_keyboard(node_id, is_admin):
     db = load_db()
     node = db.get(node_id)
@@ -431,31 +430,29 @@ def get_keyboard(node_id, is_admin):
 
     keyboard = []
     
-    # --- بخش اصلاح شده دکمه‌های پوشه ---
     children_ids = node.get("children", [])
     row = []
     for child_id in children_ids:
         child_node = db.get(child_id)
         if child_node:
-            # خواندن استایل از دیتابیس (اگر نبود None)
             btn_style = child_node.get("style") 
             
-            # ساخت دکمه با استایل
-            if btn_style:
-                button = KeyboardButton(
-                    text=child_node["name"],
-                    api_kwargs={"style": btn_style}
-                )
-            else:
-                button = KeyboardButton(text=child_node["name"])
+            # روش درست و رسمی در API 9.4:
+            # نیازی به api_kwargs نیست؛ از پارامتر text_button_appearance استفاده کن
+            appearance = {"type": btn_style} if btn_style else None
+            
+            button = KeyboardButton(
+                text=child_node["name"],
+                text_button_appearance=appearance
+            )
 
             row.append(button)
-
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
     if row:
         keyboard.append(row)
+
     # --- پایان بخش اصلاح شده ---
 
     # دکمه‌های کنترلی ادمین
