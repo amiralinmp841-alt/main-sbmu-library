@@ -431,15 +431,14 @@ def get_keyboard(node_id, is_admin):
 
     keyboard = []
 
+    # --- دکمه‌های فرزند (همان کدی که داشتی) ---
     children_ids = node.get("children", [])
     row = []
 
     for child_id in children_ids:
         child_node = db.get(child_id)
-
         if child_node:
             btn_style = child_node.get("style")
-
             if btn_style:
                 button = KeyboardButton(
                     text=child_node["name"],
@@ -447,7 +446,6 @@ def get_keyboard(node_id, is_admin):
                 )
             else:
                 button = KeyboardButton(text=child_node["name"])
-
             row.append(button)
             
             if len(row) == 2:
@@ -456,22 +454,34 @@ def get_keyboard(node_id, is_admin):
     if row:
         keyboard.append(row)
 
-    # دکمه‌های کنترلی ادمین
+    # --- دکمه‌های کنترلی ادمین ---
     if is_admin:
+        # برای ادمین هم اگر می‌خواهی رنگی باشند، باید مشابه بالا از KeyboardButton استفاده کنی
+        # فعلاً به همون شکلی که داشتی گذاشتم که بهم نریزه
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
         keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
-        #keyboard.append([os.getenv("ADMIN_ACCESSIBILITY_NAME")])
 
-
-    # دکمه‌های بازگشت
+    # --- دکمه‌های بازگشت و خانه (اصلاح شده برای رنگی شدن) ---
     nav_row = []
-    if node.get("parent"):
-        nav_row.append("🔙 بازگشت")
     
-    nav_row.append("🏠 صفحه اصلی")
+    # دکمه بازگشت
+    if node.get("parent"):
+        back_btn = KeyboardButton(
+            text="🔙 بازگشت",
+            api_kwargs={"style": "primary"}
+        )
+        nav_row.append(back_btn)
+    
+    # دکمه خانه
+    home_btn = KeyboardButton(
+        text="🏠 صفحه اصلی",
+        api_kwargs={"style": "primary"}
+    )
+    nav_row.append(home_btn)
+    
     keyboard.append(nav_row)
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -558,7 +568,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.24)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.25)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
