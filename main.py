@@ -359,7 +359,6 @@ BACKUP_FILE = "/tmp/backup_database.zip"
 userdata = load_userdata()
 
 #------ دکمه های رنگی ----------
-#------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     userdata = load_userdata()
@@ -372,9 +371,9 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = update.message.text.lower().split()[0]
 
     styles = {
-        "/green": "positive",
-        "/blue": "primary",
-        "/red": "negative",
+        "/green": "primary",
+        "/blue": "secondary",
+        "/red": "danger",
         "/none": None
     }
 
@@ -420,7 +419,9 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(parent_id, True)
     )
 
+
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
+
 def get_keyboard(node_id, is_admin):
     db = load_db()
     node = db.get(node_id)
@@ -429,53 +430,51 @@ def get_keyboard(node_id, is_admin):
         return ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
 
     keyboard = []
+
     children_ids = node.get("children", [])
     row = []
 
     for child_id in children_ids:
         child_node = db.get(child_id)
+
         if child_node:
             btn_style = child_node.get("style")
-            
-            # برای پایداری بیشتر، مطمئن می‌شویم style فقط مقادیر مجاز باشد
-            # و ساختار دکمه را ساده نگه می‌داریم
+
             if btn_style:
-                # ایجاد دکمه با پارامتر اختصاصی تو
                 button = KeyboardButton(
-                    text=child_node["name"]
+                    text=child_node["name"],
+                    api_kwargs={"style": btn_style}
                 )
-                # استفاده از دیکشنری مستقیم برای تزریق به متد زیربنایی اگر لازم شد
-                # اما این روش در PTB 20.7 معمولا کافیست:
-                button.api_kwargs = {"style": btn_style}
             else:
                 button = KeyboardButton(text=child_node["name"])
 
             row.append(button)
-
+            
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
-
     if row:
         keyboard.append(row)
 
-    # بخش ادامین و بقیه کدها تغییری نمی‌کند
+    # دکمه‌های کنترلی ادمین
     if is_admin:
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
         keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
+        #keyboard.append([os.getenv("ADMIN_ACCESSIBILITY_NAME")])
 
+
+    # دکمه‌های بازگشت
     nav_row = []
     if node.get("parent"):
         nav_row.append("🔙 بازگشت")
+    
     nav_row.append("🏠 صفحه اصلی")
     keyboard.append(nav_row)
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-
 
 # --- HELPER FUNCTIONS ---
 async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE, node_id: str):
@@ -559,7 +558,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.19)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.2.20)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -1561,6 +1560,12 @@ def build_application():
     # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
 
+    # دستورات رنگی ادمین
+    application.add_handler(CommandHandler("green", set_node_style), group=0)
+    application.add_handler(CommandHandler("blue", set_node_style), group=0)
+    application.add_handler(CommandHandler("red", set_node_style), group=0)
+    application.add_handler(CommandHandler("none", set_node_style), group=0)
+
     # 🔔 پیام‌های بدون /start → not_started
     application.add_handler(
         MessageHandler(
@@ -1608,12 +1613,6 @@ def build_application():
     )
 
     application.add_handler(conv_handler, group=1)
-
-    # در داخل build_application اضافه کنید:
-    application.add_handler(CommandHandler("green", set_node_style))
-    application.add_handler(CommandHandler("blue", set_node_style))
-    application.add_handler(CommandHandler("red", set_node_style))
-    application.add_handler(CommandHandler("none", set_node_style))
 
     return application
 
