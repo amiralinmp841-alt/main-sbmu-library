@@ -358,6 +358,45 @@ BACKUP_FILE = "/tmp/backup_database.zip"
 # در انتها، مثل قبل:
 userdata = load_userdata()
 
+#------ دکمه های رنگی ----------
+async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    is_admin = (user_id in ADMIN_IDS) or (user_id in userdata.get("sub_admins", []))
+    
+    if not is_admin:
+        return
+
+    command = update.message.text.lower()
+    current_node_id = context.user_data.get('current_node', 'root')
+    
+    if current_node_id == 'root':
+        await update.message.reply_text("❌ امکان تغییر رنگ صفحه اصلی وجود ندارد.")
+        return
+
+    # نقشه‌برداری دستورات به استایل‌های تلگرام
+    styles = {
+        "/green": "primary",
+        "/blue": "secondary",
+        "/red": "danger",
+        "/none": None
+    }
+    
+    new_style = styles.get(command.split()[0])
+    
+    db = load_db()
+    push_admin_history(context, db) # ثبت در تاریخچه برای قابلیت Undo
+    
+    db[current_node_id]["style"] = new_style
+    save_db(db)
+    
+    color_name = command.replace("/", "")
+    await update.message.reply_text(
+        f"✅ رنگ این پوشه به {color_name} تغییر یافت.\n"
+        f"تغییرات در منوی قبلی (والد) قابل مشاهده است.",
+        reply_markup=get_keyboard(current_node_id, True)
+    )
+
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
 def get_keyboard(node_id, is_admin):
@@ -369,18 +408,27 @@ def get_keyboard(node_id, is_admin):
 
     keyboard = []
     
-    # دکمه‌های موجود (پوشه‌ها) را اضافه کن
+    # --- بخش اصلاح شده دکمه‌های پوشه ---
     children_ids = node.get("children", [])
     row = []
     for child_id in children_ids:
         child_node = db.get(child_id)
         if child_node:
-            row.append(KeyboardButton(child_node["name"]))
-            if len(row) == 2: # چینش دو تایی
+            # خواندن استایل از دیتابیس (اگر نبود None)
+            btn_style = child_node.get("style") 
+            
+            # ساخت دکمه با استایل
+            button = KeyboardButton(text=child_node["name"])
+            if btn_style:
+                button.style = btn_style # اعمال استایل (primary/secondary/danger)
+                
+            row.append(button)
+            if len(row) == 2:
                 keyboard.append(row)
                 row = []
     if row:
         keyboard.append(row)
+    # --- پایان بخش اصلاح شده ---
 
     # دکمه‌های کنترلی ادمین
     if is_admin:
@@ -1533,6 +1581,12 @@ def build_application():
     )
 
     application.add_handler(conv_handler, group=1)
+
+    # در داخل build_application اضافه کنید:
+    application.add_handler(CommandHandler("green", set_node_style))
+    application.add_handler(CommandHandler("blue", set_node_style))
+    application.add_handler(CommandHandler("red", set_node_style))
+    application.add_handler(CommandHandler("none", set_node_style))
 
     return application
 
