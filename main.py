@@ -682,7 +682,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
 
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.4)",
+        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.5)",
         reply_markup=get_keyboard("root", is_admin)
     )
 
@@ -958,7 +958,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return CHOOSING
 
-
     # 1. هندل کردن بازگشت و خانه
     if text == "🏠 صفحه اصلی":
         context.user_data['current_node'] = 'root'
@@ -974,8 +973,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['current_node'] = 'root'
             await update.message.reply_text("شما در صفحه اصلی هستید.", reply_markup=get_keyboard('root', is_admin))
         return CHOOSING
-
-    
+ 
     # --- Admin Accessibility --- 
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
         context.user_data["admin_panel"] = "access"
@@ -986,92 +984,14 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
         return CHOOSING
-    
 
     # --- Admin Management ---
-    if is_admin and text == "👑 مدیریت ادمین‌ها":
-        context.user_data["admin_panel"] = "admin_mgmt"
-        await update.message.reply_text(
-            "👑 مدیریت ادمین‌ها:",
-            reply_markup=ReplyKeyboardMarkup([
-                ["🔑 تنظیم رمز ادمینی"],
-                ["➕ افزودن ادمین", "➖ حذف ادمین"],
-                ["📋 لیست ادمین‌ها"], 
-                ["🔙 بازگشت"]
-            ], resize_keyboard=True)
-        )
-        return CHOOSING
-
-    if is_admin and text == "🔑 تنظیم رمز ادمینی":
-        admin_pass = userdata.get("admin_password", "تعریف نشده")
-        await update.message.reply_text(
-            f"🔐 رمز ادمینی فعلی:\n\n<code>{admin_pass}</code>",
-            parse_mode="HTML",
-            reply_markup=ReplyKeyboardMarkup([
-                ["✏️ ویرایش رمز"],
-                ["🔙 بازگشت"]
-            ], resize_keyboard=True)
-        )
-        return CHOOSING
-
-    if is_admin and text == "✏️ ویرایش رمز":
-        await update.message.reply_text(
-            "✏️ رمز جدید ادمینی را ارسال کنید:",
-            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
-        )
-        return WAITING_ADMIN_PASSWORD_EDIT
-
-    if is_admin and text == "📤 دریافت userdata":
-    
-        userdata = load_userdata()
-    
-        json_bytes = json.dumps(userdata, ensure_ascii=False, indent=2).encode("utf-8")
-    
-        zip_buffer = iolib.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-            zipf.writestr("userdata.json", json_bytes)
-    
-        zip_buffer.seek(0)
-    
-        await update.message.reply_document(
-            document=zip_buffer,
-            filename=".userdata.zip",
-            caption="📦 بکاپ userdata"
-        )
-    
-        return CHOOSING
-
-    if is_admin and text == "📥 وارد کردن userdata":
-        await update.message.reply_text(
-            "📥 فایل .userdata.zip را ارسال کنید",
-            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
-        )
-        return WAITING_USERDATA_UPLOAD
-
-    if is_admin and text == "➕ افزودن ادمین":
-        await update.message.reply_text(
-            "📝 آیدی عددی یا نام کاربری فرد مورد نظر را ارسال کنید:",
-            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
-        )
-        return WAITING_ADD_ADMIN
-    
-    if is_admin and text == "➖ حذف ادمین":
-        await update.message.reply_text(
-            "📝 آیدی عددی یا نام کاربری ادمینی که میخواید حذف کنید را ارسال کنید:",
-            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
-        )
-        return WAITING_REMOVE_ADMIN
-
-    if is_admin and text == "📋 لیست ادمین‌ها":
-        return await list_admins(update, context)
-
     if text == "❌ لغو":
         await update.message.reply_text(
             "❌ عملیات لغو شد.",
             reply_markup=get_keyboard("admin_mgmt", True)
         )
         return CHOOSING
-    
     
     # ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ===
             
