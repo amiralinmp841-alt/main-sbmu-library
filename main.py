@@ -41,6 +41,7 @@ from aiohttp import web
 import requests
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from smart_search import smart_search
 
 
 def delete_node_recursive(db, node_id):
@@ -756,7 +757,79 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     await update.message.reply_voice(voice=file_id, caption=caption, parse_mode="HTML")
         except Exception as e:
             logging.error(f"Error sending content: {e}")
+            
+def get_subtree_db(db, root_node_id):
+    subtree = {}
 
+    def build_search_context(node_id):
+        parts = []
+        current = node_id
+
+        while current and current in db:
+            if current != "root":
+                parts.append(db[current].get("name", ""))
+            current = db[current].get("parent")
+
+        parts.reverse()
+        return " ".join(parts)
+
+    def add_node_recursive(node_id):
+        if node_id not in db:
+            return
+
+        node = copy.deepcopy(db[node_id])
+
+        search_context = build_search_context(node_id)
+
+        # متن جستجو را مستقیماً داخل name قرار می‌دهیم
+        node["name"] = search_context
+
+        subtree[node_id] = node
+
+        for child in db[node_id].get("children", []):
+            add_node_recursive(child)
+
+    add_node_recursive(root_node_id)
+    return subtree
+
+async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, is_admin: bool):
+    full_db = load_db()
+    current_node = context.user_data.get("current_node", "root")
+    
+    # محدود کردن جستجو فقط به زیرشاخه فعلی
+    subtree_db = get_subtree_db(full_db, current_node)
+    
+    # جستجو در زیرشاخه
+    results = smart_search(subtree_db, text, limit=5, min_score=45)
+
+    if not results:
+        await update.message.reply_text("🔍 نتیجه‌ای در این پوشه یافت نشد.")
+        return CHOOSING
+
+    bot_username = context.bot.username
+    msg = "🔍 نتایج یافت شده در این پوشه:\n\n"
+
+    for item in results:
+        node_id = item["node_id"]
+        # دریافت مسیر کامل از دیتابیس اصلی
+        path_text = get_node_path_text(full_db, node_id)
+        
+        # ساخت دیپ‌لینک
+        deep_link = f"https://t.me/{bot_username}?start={node_id}"
+        
+        # فرمت‌دهی با لینک HTML (قابل کلیک)
+        msg += f"📂 <a href='{deep_link}'>{path_text}</a>\n"
+        msg += f"امتیاز تطابق: {int(item['score'])}٪\n\n"
+
+    msg += "روی مسیر آبی‌رنگ کلیک کنید تا مستقیم به آنجا بروید."
+
+    await update.message.reply_text(
+        msg, 
+        parse_mode="HTML", 
+        disable_web_page_preview=True
+    )
+
+    return CHOOSING
 
 # --- HANDLERS ---
 async def not_started(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -838,12 +911,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🏠 start عادی
     context.user_data["current_node"] = "root"
-
+    
     await update.message.reply_text(
-        "🕊️ به ربات دانشگاه خوش آمدید. (V_4.3.12)",
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.3.21)
+    
+    🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
+    مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
+    
+    یا اینکه از دکمه‌های آماده استفاده کنید.""",
         reply_markup=get_keyboard("root", is_admin)
     )
-
     return CHOOSING
 
 async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1917,8 +1994,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_node_contents(update, context, child_id)
             return CHOOSING
 
-
-
+    # ✅ اگر دکمه نبود، سرچ کن
+    return await handle_smart_search(update, context, text, is_admin)
 
 async def rename_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == "❌ لغو":
@@ -2299,14 +2376,16 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         def clone_node(old_id, new_parent):
             new_id = str(uuid.uuid4())
             old = db[old_id]
-
+            
+            # 💡 کپی کردن تمام فیلدها از جمله style
             db[new_id] = {
                 "name": old["name"],
                 "parent": new_parent,
                 "children": [],
-                "contents": old.get("contents", []).copy()
+                "contents": old.get("contents", []).copy(),
+                "style": old.get("style")  # <--- این خط را اضافه کن
             }
-
+            
             for child in old.get("children", []):
                 child_new_id = clone_node(child, new_id)
                 db[new_id]["children"].append(child_new_id)
