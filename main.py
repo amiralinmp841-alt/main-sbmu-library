@@ -91,6 +91,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 TOKEN = os.getenv("TOKEN")
 
 REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
+MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
 
 ADMIN_IDS = []
 if os.getenv("ADMIN_IDS"):
@@ -847,6 +848,36 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return CHOOSING
 
+async def deeplink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+    
+    user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        await update.message.reply_text("⛔️ شما بن شده‌اید.")
+        return CHOOSING
+
+    db = load_db()
+    
+    # اولویت با صفحه‌ای است که کاربر در آن است
+    node_id = context.user_data.get("current_report_node") or context.user_data.get("current_node", "root")
+
+    if node_id not in db:
+        await update.message.reply_text("❌ صفحه فعلی پیدا نشد.")
+        return CHOOSING
+
+    bot_username = context.bot.username
+    deep_link = f"https://t.me/{bot_username}?start={node_id}"
+    page_name = html.escape(db[node_id].get("name", "بدون نام"))
+
+    msg = (
+        f"🔗 <b>دیپ‌لینک صفحه:</b> <code>{page_name}</code>\n\n"
+        f"برای اشتراک‌گذاری، روی لینک زیر بزنید:\n"
+        f"<code>{html.escape(deep_link)}</code>"
+    )
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+    return CHOOSING
+
 async def start_chat_with_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=False)
 
@@ -861,7 +892,7 @@ async def start_chat_with_admin(update: Update, context: ContextTypes.DEFAULT_TY
         return CHOOSING
 
     # اگر گروه تنظیم نشده باشد
-    if not REPORT_GROUP_ID:
+    if not MASSAGE_GROUP_ID:
         await update.message.reply_text("❌ گروه مدیریت تنظیم نشده است.")
         return CHOOSING
 
@@ -878,6 +909,16 @@ async def receive_chat_message(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     message = update.message
 
+    # بررسی اینکه آیا کاربر می‌خواهد چت را لغو کند
+    if message.text and message.text.strip() == "/cancel":
+        current_node = context.user_data.get("current_node", "root")
+        await message.reply_text(
+            "❌ چت با مدیریت پایان یافت. به منوی اصلی بازگشتید.",
+            # در صورت وجود تابع ساخت کیبورد، کیبورد منوی اصلی را اینجا قرار دهید:
+            # reply_markup=get_keyboard(current_node) 
+        )
+        return CHOOSING
+
     full_name = html.escape(user.full_name or "بدون نام")
     username = user.username
     username_text = f"@{html.escape(username)}" if username else "ندارد"
@@ -887,31 +928,36 @@ async def receive_chat_message(update: Update, context: ContextTypes.DEFAULT_TYP
         "📨 <b>پیام جدید برای مدیریت</b>\n\n"
         f"👤 <b>کاربر:</b> {user_link}\n"
         f"🆔 <b>آیدی عددی:</b> <code>{user.id}</code>\n"
-        f"🔗 <b>یوزرنیم:</b> <code>{username_text}</code>\n\n"
+        f"🔗 <b>یوزرنیم:</b> {username_text}\n\n"
         "📩 <b>محتوا:</b>"
     )
 
     try:
+        # ۱. ارسال مشخصات کاربر به گروه
         await context.bot.send_message(
-            chat_id=REPORT_GROUP_ID,
+            chat_id=MASSAGE_GROUP_ID,
             text=header,
             parse_mode="HTML"
         )
 
-        # پیام اصلی را کپی کن
+        # ۲. کپی پیام کاربر (کپی کامل هرگونه فایل، عکس، ویدیو، گیف، استیکر و متن)
         await context.bot.copy_message(
-            chat_id=REPORT_GROUP_ID,
+            chat_id=MASSAGE_GROUP_ID,
             from_chat_id=message.chat_id,
             message_id=message.message_id
         )
 
-        await update.message.reply_text("✅ پیام شما برای مدیریت ارسال شد.")
+        await update.message.reply_text(
+            "✅ پیام شما برای مدیریت ارسال شد.\n"
+            "می‌توانید پیام‌های بعدی خود را بفرستید یا برای اتمام چت دستور /cancel را ارسال کنید."
+        )
 
     except Exception as e:
         print("Failed to send chat message:", e)
         await update.message.reply_text("❌ ارسال پیام با خطا مواجه شد.")
 
-    return CHOOSING
+    # بسیار مهم: کاربر در وضعیت چت باقی می‌ماند تا زمانی که /cancel بفرستد
+    return WAITING_CHAT_MESSAGE
 
 async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE, node_id: str):
     """محتواهای موجود در نود فعلی را ارسال می‌کند"""
@@ -1101,7 +1147,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.2)
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.3)
     
     🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
     مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
@@ -2186,20 +2232,20 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # در handle_navigation یا یک پیام‌گیر عمومی:
     if context.user_data.get("waiting_for_user_reply"):
-        REPORT_GROUP_ID = os.getenv("REPORT_GROUP_ID")
+        MASSAGE_GROUP_ID = os.getenv("MASSAGE_GROUP_ID")
         user = update.effective_user
     
         safe_name = html.escape(user.full_name or "کاربر")
         user_link = f'<a href="tg://user?id={user.id}">{safe_name}</a>'
     
         await context.bot.send_message(
-            chat_id=REPORT_GROUP_ID,
+            chat_id=MASSAGE_GROUP_ID,
             text=f"📩 پاسخ جدید از طرف {user_link} (<code>{user.id}</code>):",
             parse_mode="HTML"
         )
     
         await context.bot.copy_message(
-            chat_id=REPORT_GROUP_ID,
+            chat_id=MASSAGE_GROUP_ID,
             from_chat_id=update.message.chat_id,
             message_id=update.message.message_id
         )
@@ -3099,6 +3145,7 @@ def build_application():
         states={
             CHOOSING: [
                 CommandHandler("report", report_page),
+                CommandHandler("deeplink", deeplink_command),
                 CommandHandler("chat", start_chat_with_admin),
                 CallbackQueryHandler(inline_handler, pattern="^reply_to_admin$"),
                 CallbackQueryHandler(inline_handler, pattern="^admin_"),
@@ -3152,8 +3199,8 @@ def build_application():
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_broadcast_content)
             ],
             WAITING_CHAT_MESSAGE: [
-                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_chat_message),
-                CommandHandler("cancel", cancel)
+                CommandHandler("cancel", cancel),
+                MessageHandler(filters.ALL & (~filters.COMMAND), receive_chat_message),
             ]
         },
         fallbacks=[CommandHandler('start', start)]
