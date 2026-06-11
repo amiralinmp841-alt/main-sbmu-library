@@ -78,7 +78,6 @@ def push_admin_history(context, db):
 # --- wewb port ---
 PORT = int(os.environ.get("PORT", 10000))
 
-
 # ------ userdata -------
 USERDATA_FILE = "/tmp/userdata.json"
 
@@ -90,9 +89,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # توکن و آیدی عددی ادمین از متغیرهای محیطی خوانده می‌شود
 TOKEN = os.getenv("TOKEN")
-import os
 
-# خواندن لیست ادمین‌ها از متغیر محیطی
+REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
+
 ADMIN_IDS = []
 if os.getenv("ADMIN_IDS"):
     ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS").split(",")))
@@ -126,8 +125,9 @@ logging.basicConfig(
     WAITING_UNBAN_USER,
     WAITING_BROADCAST_CONTENT,
     WAITING_SINGLE_USER_CONTENT,
-    WAITING_PICK_USER_FOR_MSG
-) = range(14)
+    WAITING_PICK_USER_FOR_MSG,
+    WAITING_CHAT_MESSAGE 
+) = range(15)
 
 # ============ TELEGRAM USER API BACKUP CONFIG ============
 
@@ -766,9 +766,156 @@ def get_node_path_text(db, node_id, separator=" ⬅️ "):
 
     return separator.join(path)
 
+def set_report_page(context: ContextTypes.DEFAULT_TYPE, node_id: str):
+    """
+    ذخیره صفحه فعلی برای قابلیت /report
+    """
+    context.user_data["current_report_node"] = node_id
+
+async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+
+    user = update.effective_user
+    user_id = user.id
+
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
+
+    if not REPORT_GROUP_ID:
+        await update.message.reply_text("❌ گروه گزارشات برای ربات تنظیم نشده است.")
+        return CHOOSING
+
+    db = load_db()
+
+    # اولویت با صفحه‌ای است که برای ریپورت ذخیره شده
+    node_id = context.user_data.get("current_report_node")
+
+    # اگر نبود، از current_node استفاده کن
+    if not node_id:
+        node_id = context.user_data.get("current_node", "root")
+
+    if node_id not in db:
+        await update.message.reply_text("❌ صفحه فعلی برای گزارش پیدا نشد.")
+        return CHOOSING
+
+    node = db[node_id]
+
+    bot_username = context.bot.username
+    deep_link = f"https://t.me/{bot_username}?start={node_id}"
+
+    page_name = html.escape(node.get("name", "بدون نام"))
+    path_text = html.escape(get_node_path_text(db, node_id))
+
+    full_name = html.escape(user.full_name or "بدون نام")
+    username = user.username
+
+    if username:
+        username_text = f"@{html.escape(username)}"
+    else:
+        username_text = "ندارد"
+
+    user_link = f'<a href="tg://user?id={user.id}">{full_name}</a>'
+
+    report_text = (
+        "🚨 <b>گزارش صفحه</b>\n\n"
+        f"👤 <b>کاربر گزارش‌دهنده:</b> {user_link}\n"
+        f"🆔 <b>آیدی عددی کاربر:</b> <code>{user.id}</code>\n"
+        f"🔗 <b>یوزرنیم:</b> <code>{username_text}</code>\n\n"
+        f"📄 <b>نام صفحه:</b> {page_name}\n"
+        f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
+        f"🔑 <b>هش صفحه:</b>\n<code>{html.escape(node_id)}</code>\n\n"
+        f"🔗 <b>دیپ‌لینک صفحه:</b>\n{html.escape(deep_link)}"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=REPORT_GROUP_ID,
+            text=report_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+        await update.message.reply_text("✅ گزارش شما برای مدیریت ارسال شد.")
+
+    except Exception as e:
+        print("Failed to send report:", e)
+        await update.message.reply_text("❌ ارسال گزارش با خطا مواجه شد.")
+
+    return CHOOSING
+
+async def start_chat_with_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+
+    user = update.effective_user
+    user_id = user.id
+
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از این بخش را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
+
+    # اگر گروه تنظیم نشده باشد
+    if not REPORT_GROUP_ID:
+        await update.message.reply_text("❌ گروه مدیریت تنظیم نشده است.")
+        return CHOOSING
+
+    # شروع فرایند چت
+    await update.message.reply_text(
+        "✉️ پیام خود را برای مدیریت ارسال کنید.\n"
+        "اگر منصرف شدید /cancel را بزنید.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    return WAITING_CHAT_MESSAGE
+
+async def receive_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.message
+
+    full_name = html.escape(user.full_name or "بدون نام")
+    username = user.username
+    username_text = f"@{html.escape(username)}" if username else "ندارد"
+    user_link = f'<a href="tg://user?id={user.id}">{full_name}</a>'
+
+    header = (
+        "📨 <b>پیام جدید برای مدیریت</b>\n\n"
+        f"👤 <b>کاربر:</b> {user_link}\n"
+        f"🆔 <b>آیدی عددی:</b> <code>{user.id}</code>\n"
+        f"🔗 <b>یوزرنیم:</b> <code>{username_text}</code>\n\n"
+        "📩 <b>محتوا:</b>"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=REPORT_GROUP_ID,
+            text=header,
+            parse_mode="HTML"
+        )
+
+        # پیام اصلی را کپی کن
+        await context.bot.copy_message(
+            chat_id=REPORT_GROUP_ID,
+            from_chat_id=message.chat_id,
+            message_id=message.message_id
+        )
+
+        await update.message.reply_text("✅ پیام شما برای مدیریت ارسال شد.")
+
+    except Exception as e:
+        print("Failed to send chat message:", e)
+        await update.message.reply_text("❌ ارسال پیام با خطا مواجه شد.")
+
+    return CHOOSING
 
 async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE, node_id: str):
     """محتواهای موجود در نود فعلی را ارسال می‌کند"""
+    set_report_page(context, node_id)
     db = load_db()
     contents = db[node_id].get("contents", [])
     
@@ -917,6 +1064,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = args[0]
 
         if target_id in db:
+            set_report_page(context, target_id)
             target_node = db[target_id]
             has_children = bool(target_node.get("children"))
 
@@ -950,9 +1098,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🏠 start عادی
     context.user_data["current_node"] = "root"
+    set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.3.22)
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.2)
     
     🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
     مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
@@ -1998,19 +2147,32 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. هندل کردن بازگشت و خانه
     if text == "🏠 صفحه اصلی":
         context.user_data['current_node'] = 'root'
+        set_report_page(context, "root")
         await update.message.reply_text("به صفحه اصلی بازگشتید.", reply_markup=get_keyboard('root', is_admin))
         return CHOOSING
     
     if text == "🔙 بازگشت":
         parent = db[current_node_id].get('parent')
+    
         if parent:
             context.user_data['current_node'] = parent
-            await update.message.reply_text("بازگشت به عقب.", reply_markup=get_keyboard(parent, is_admin))
+            set_report_page(context, parent)
+    
+            await update.message.reply_text(
+                "بازگشت به عقب.",
+                reply_markup=get_keyboard(parent, is_admin)
+            )
         else:
             context.user_data['current_node'] = 'root'
-            await update.message.reply_text("شما در صفحه اصلی هستید.", reply_markup=get_keyboard('root', is_admin))
+            set_report_page(context, "root")
+    
+            await update.message.reply_text(
+                "شما در صفحه اصلی هستید.",
+                reply_markup=get_keyboard('root', is_admin)
+            )
+    
         return CHOOSING
-
+    
     # --- Admin Accessibility --- 
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
         context.user_data["admin_panel"] = "access"
@@ -2317,18 +2479,21 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     children = db[current_node_id].get("children", [])
     for child_id in children:
         child_node = db.get(child_id)
-
+    
         if child_node and child_node["name"] == text:
-
+    
+            # ✅ این صفحه برای report ذخیره شود
+            set_report_page(context, child_id)
+    
             # 👤 کاربر عادی + دکمه بدون فرزند
             if not is_admin and not child_node.get("children"):
                 # فقط محتوا را نمایش بده، بدون تغییر صفحه
                 await send_node_contents(update, context, child_id)
                 return CHOOSING
-
+    
             # 👑 ادمین یا دکمه دارای فرزند
             context.user_data['current_node'] = child_id
-
+    
             await update.message.reply_text(
                 f"📂 {child_node['name']}",
                 reply_markup=get_keyboard(child_id, is_admin)
@@ -2933,6 +3098,8 @@ def build_application():
         entry_points=[CommandHandler('start', start)],
         states={
             CHOOSING: [
+                CommandHandler("report", report_page),
+                CommandHandler("chat", start_chat_with_admin),
                 CallbackQueryHandler(inline_handler, pattern="^reply_to_admin$"),
                 CallbackQueryHandler(inline_handler, pattern="^admin_"),
                 MessageHandler(filters.TEXT & (~filters.COMMAND), handle_navigation)
@@ -2983,6 +3150,10 @@ def build_application():
             ],
             WAITING_SINGLE_USER_CONTENT: [
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_broadcast_content)
+            ],
+            WAITING_CHAT_MESSAGE: [
+                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_chat_message),
+                CommandHandler("cancel", cancel)
             ]
         },
         fallbacks=[CommandHandler('start', start)]
