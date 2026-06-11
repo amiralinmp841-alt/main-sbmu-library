@@ -832,6 +832,13 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔗 <b>دیپ‌لینک صفحه:</b>\n{html.escape(deep_link)}"
     )
 
+    user_reply = (
+        "✅ گزارش شما با موفقیت برای مدیریت ارسال شد.\n\n"
+        f"📄 <b>نام صفحه:</b> {page_name}\n"
+        f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
+        f"🔗 <b>دیپ‌لینک صفحه:</b>\n<code>{html.escape(deep_link)}</code>"
+    )
+    
     try:
         await context.bot.send_message(
             chat_id=REPORT_GROUP_ID,
@@ -840,7 +847,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
 
-        await update.message.reply_text("✅ گزارش شما برای مدیریت ارسال شد.")
+        await update.message.reply_text(user_reply, parse_mode="HTML")
 
     except Exception as e:
         print("Failed to send report:", e)
@@ -1147,7 +1154,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.3)
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.4)
     
     🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
     مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
