@@ -913,7 +913,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_node"] = "root"
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.3.21)
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.3.22)
     
     🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
     مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
@@ -1082,8 +1082,8 @@ async def admin_inline_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return CHOOSING
     
-    # ---------------- لیست کاربران ----------------
-    if data == "admin_users_list":
+    # ---------------- لیست کاربران + صفحه‌بندی ----------------
+    if data == "admin_users_list" or data.startswith("admin_users_list_page_"):
         return await list_users_inline(update, context)
 
     # ---------------- پنل بن کاربران ----------------
@@ -1217,6 +1217,7 @@ async def list_admins_inline(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def list_users_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    data = query.data
 
     userdata = load_userdata()
     users = userdata.get("users", {})
@@ -1232,32 +1233,62 @@ async def list_users_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CHOOSING
 
+    # ---------------- دریافت شماره صفحه ----------------
+    page = 0
+
+    if data.startswith("admin_users_list_page_"):
+        try:
+            page = int(data.split("_")[-1])
+        except Exception:
+            page = 0
+
+    # جلوگیری از صفحه منفی
+    if page < 0:
+        page = 0
+
     users_list = []
 
-    for user_id, data in users.items():
+    for user_id, user_data in users.items():
         try:
-            count = int(data.get("message_count", 0))
+            count = int(user_data.get("message_count", 0))
         except Exception:
             count = 0
 
         users_list.append({
-            "id": str(data.get("id", user_id)),
-            "full_name": data.get("full_name") or "بدون نام",
-            "username": data.get("username"),
+            "id": str(user_data.get("id", user_id)),
+            "full_name": user_data.get("full_name") or "بدون نام",
+            "username": user_data.get("username"),
             "message_count": count,
-            "banned": bool(data.get("banned", False))
+            "banned": bool(user_data.get("banned", False))
         })
 
     # مرتب‌سازی از بیشترین دستور به کمترین
     users_list.sort(key=lambda x: x["message_count"], reverse=True)
 
-    msg = "👥 لیست کاربران ربات:\n\n"
+    # ---------------- تنظیمات صفحه‌بندی ----------------
+    per_page = 15
+    total_users = len(users_list)
+    total_pages = (total_users + per_page - 1) // per_page
+
+    # اگر صفحه از تعداد صفحات بیشتر شد، برگرد آخرین صفحه
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start_index = page * per_page
+    end_index = start_index + per_page
+
+    page_users = users_list[start_index:end_index]
+
+    # ---------------- ساخت متن پیام ----------------
+    msg = f"👥 لیست کاربران ربات\n\n"
+    msg += f"📄 صفحه {page + 1} از {total_pages}\n"
+    msg += f"👤 تعداد کل کاربران: {total_users}\n\n"
     msg += "نام | آیدی عددی | تعداد دستور | وضعیت\n"
     msg += "━━━━━━━━━━━━━━\n"
 
-    for user in users_list:
-        uid = user["id"]
-        name = html.escape(user["full_name"])
+    for user in page_users:
+        uid = str(user["id"])
+        name = html.escape(str(user["full_name"]))
         username = user.get("username")
         count = user["message_count"]
         banned = user["banned"]
@@ -1268,26 +1299,51 @@ async def list_users_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # اگر یوزرنیم داشت، لینک t.me بده
         # اگر نداشت، لینک مستقیم با tg://user?id
         if username:
-            safe_username = html.escape(username.lstrip("@"))
-            name_link = f'<a href="https://t.me/{safe_username}">{name}</a>'
+            safe_username = str(username).strip().lstrip("@")
+
+            # برای لینک t.me فقط حروف، عدد و آندرلاین مجاز است
+            if safe_username.replace("_", "").isalnum() and 5 <= len(safe_username) <= 32:
+                name_link = f'<a href="https://t.me/{safe_username}">{name}</a>'
+            else:
+                name_link = f'<a href="tg://user?id={uid}">{name}</a>'
         else:
             name_link = f'<a href="tg://user?id={uid}">{name}</a>'
 
         msg += f'{name_link} | <code>{uid}</code> | {count} دستور | {status_icon}\n'
 
-    # محدودیت پیام تلگرام حدود 4096 کاراکتر است
-    if len(msg) > 3900:
-        msg = msg[:3900] + "\n\n⚠️ لیست طولانی بود و کوتاه شد."
+    # ---------------- ساخت دکمه‌های قبلی/بعدی ----------------
+    keyboard = []
+
+    nav_buttons = []
+
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                "⬅️ قبلی",
+                callback_data=f"admin_users_list_page_{page - 1}"
+            )
+        )
+
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                "بعدی ➡️",
+                callback_data=f"admin_users_list_page_{page + 1}"
+            )
+        )
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    keyboard.append([
+        InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")
+    ])
 
     await query.message.edit_text(
         msg,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔙 بازگشت", callback_data="admin_users")
-            ]
-        ])
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
     return CHOOSING
