@@ -985,8 +985,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🗂 <b>نوع محتوا:</b> {html.escape(content_type_text)}\n"
                 f"📂 <b>نام پوشه:</b> {page_name}\n"
                 f"📍 <b>مسیر پوشه:</b>\n{path_text}\n\n"
-                f"🔗 <b>دیپ‌لینک فایل:</b>\n<code>{html.escape(deep_link)}</code>\n\n"
-                f"📝 <b>متن گزارش:</b>\n{content_preview}"
+                f"🔗 <b>دیپ‌لینک فایل:</b>\n<code>{html.escape(deep_link)}</code>"
             )
 
             set_pending_report(context, {
@@ -1031,8 +1030,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ گزارش شما با موفقیت برای مدیریت ارسال شد.\n\n"
             f"📄 <b>نام صفحه:</b> {page_name}\n"
             f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
-            f"🔗 <b>دیپ‌لینک صفحه:</b>\n<code>{html.escape(deep_link)}</code>\n\n"
-            f"📝 <b>متن گزارش:</b>\n{content_preview}"
+            f"🔗 <b>دیپ‌لینک صفحه:</b>\n<code>{html.escape(deep_link)}</code>"
         )
 
         set_pending_report(context, {
