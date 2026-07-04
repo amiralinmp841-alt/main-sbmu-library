@@ -379,6 +379,7 @@ def track_user_activity(update: Update, count_message=True):
     - آیدی عددی
     - تعداد پیام‌ها / دستورها
     - وضعیت بن
+    - حفظ سایر تنظیمات مثل smart_search_disabled
     """
 
     user = update.effective_user
@@ -396,17 +397,24 @@ def track_user_activity(update: Update, count_message=True):
     full_name = user.full_name or "بدون نام"
     username = user.username
 
-    users[user_id] = {
-        "id": user.id,
-        "full_name": full_name,
-        "username": username,
-        "message_count": old_count + 1 if count_message else old_count,
-        "banned": bool(old_data.get("banned", False)),
-        "first_seen": old_data.get("first_seen") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
+    # به جای overwrite کامل، از اطلاعات قبلی کپی بگیر
+    user_record = old_data.copy()
 
-    new_count = users[user_id]["message_count"]
+    # فقط فیلدهای لازم را آپدیت کن
+    user_record["id"] = user.id
+    user_record["full_name"] = full_name
+    user_record["username"] = username
+    user_record["message_count"] = old_count + 1 if count_message else old_count
+    user_record["banned"] = bool(old_data.get("banned", False))
+    user_record["first_seen"] = old_data.get("first_seen") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_record["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # اگر از قبل وجود نداشت، پیش‌فرض سرچ هوشمند را روشن نگه دار
+    user_record["smart_search_disabled"] = old_data.get("smart_search_disabled", False)
+
+    users[user_id] = user_record
+
+    new_count = user_record["message_count"]
 
     # برای سبک شدن:
     # هر پیام فقط لوکال ذخیره می‌شود.
@@ -1041,8 +1049,15 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     # جستجو در زیرشاخه
     results = smart_search(subtree_db, text, limit=5, min_score=45)
 
+    help_text = (
+        "\n\n⚙️ برای خاموش یا روشن کردن سرچ هوشمند، از دستور /on_of_search استفاده کنید.\n"
+    )
+
     if not results:
-        await update.message.reply_text("🔍 نتیجه‌ای در این پوشه یافت نشد.")
+        await update.message.reply_text(
+            "🔍 نتیجه‌ای در این پوشه یافت نشد." + help_text,
+            parse_mode="HTML"
+        )
         return CHOOSING
 
     bot_username = context.bot.username
@@ -1058,9 +1073,10 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # فرمت‌دهی با لینک HTML (قابل کلیک)
         msg += f"📂 <a href='{deep_link}'>{path_text}</a>\n"
-        msg += f"امتیاز تطابق: {int(item['score'])}٪\n\n"
+        msg += f"درصد تطابق: {int(item['score'])}٪\n\n"
 
     msg += "روی مسیر آبی‌رنگ کلیک کنید تا مستقیم به آنجا بروید."
+    msg += help_text
 
     await update.message.reply_text(
         msg, 
@@ -1068,6 +1084,40 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         disable_web_page_preview=True
     )
 
+    return CHOOSING
+
+async def toggle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return CHOOSING
+    
+    user_id = str(user.id)
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+    
+    # اگر کاربر در دیتابیس نبود، ابتدا او را ثبت یا داده‌ی پیش‌فرض می‌گذاریم
+    if user_id not in users:
+        # برای ثبت مشخصات اولیه
+        track_user_activity(update, count_message=False)
+        userdata = load_userdata()  # بازخوانی دیتای جدید
+        users = userdata.get("users", {})
+
+    # خواندن وضعیت (اگر مقدار نبود، پیش‌فرض False است؛ یعنی سرچ هوشمند فعال/روشن است)
+    is_disabled = users.get(user_id, {}).get("smart_search_disabled", False)
+    
+    # تغییر وضعیت (معکوس کردن)
+    new_disabled_status = not is_disabled
+    users[user_id]["smart_search_disabled"] = new_disabled_status
+    
+    # ذخیره در فایل
+    save_userdata(userdata, upload=True)
+    
+    # پیام به کاربر بر اساس وضعیت جدید
+    if new_disabled_status:
+        await update.message.reply_text("🔴 سرچ هوشمند برای شما <b>خاموش</b> شد.", parse_mode="HTML")
+    else:
+        await update.message.reply_text("🟢 سرچ هوشمند برای شما مجدداً <b>روشن</b> شد.", parse_mode="HTML")
+        
     return CHOOSING
 
 # --- HANDLERS ---
@@ -1154,12 +1204,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.4)
+        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.15)
     
     🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
-    مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
-    
-    یا اینکه از دکمه‌های آماده استفاده کنید.""",
+           مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
+           یا اینکه از دکمه‌های آماده استفاده کنید.
+
+    ⚙️ برای خاموش و روشن کردن سرچ هوشمند، از کامند /on_of_search استفاده کنید.
+
+    🤝 درصورت مشاهده اشکال در محتوای پوشه‌ها، می‌توانید با دستور /report، محتوای آخرین پوشه‌ای که در آن بودید را به ما گزارش دهید و در توسعه محتوای ربات، کمکمان کنید.
+
+    🔗 جهت دریافت لینک هر پوشه و اشتراک گذاری آن، از دستور /deeplink استفاده کنید. 
+
+    👨‍💻 پیشنهادات و انتقادات خود را با ما، درمیان بگذارید. پیام به ادمین: /chat """,
+
         reply_markup=get_keyboard("root", is_admin)
     )
     return CHOOSING
@@ -2123,6 +2181,36 @@ async def show_admin_mgmt_panel(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["admin_panel"] = "admin_mgmt"
     return CHOOSING
 
+def find_nearest_valid_node(db, target_node_id):
+    """
+    بررسی می‌کند آیا نود در دیتابیس جدید وجود دارد یا خیر.
+    اگر وجود نداشت، به والد آن نود مراجعه می‌کند تا اولین والد معتبری که در دیتابیس جدید وجود دارد را پیدا کند.
+    اگر هیچ‌کدام پیدا نشد، 'root' را برمی‌گرداند.
+    """
+    # اگر نود در دیتابیس جدید موجود است
+    if target_node_id in db:
+        return target_node_id
+
+    # پیدا کردن والد نود در کل دیتابیس (پیمایش معکوس)
+    current = target_node_id
+    while True:
+        parent_id = None
+        # پیدا کردن والدی که این نود فرزند آن بوده است
+        for node_id, node_data in db.items():
+            if current in node_data.get("children", []):
+                parent_id = node_id
+                break
+        
+        if parent_id and parent_id in db:
+            return parent_id  # والد معتبر پیدا شد
+        elif parent_id:
+            current = parent_id  # والد را به عنوان نود بعدی برای جستجو قرار بده
+        else:
+            break  # والدی پیدا نشد
+            
+    return "root"
+
+
 
 async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=True)
@@ -2204,27 +2292,35 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("به صفحه اصلی بازگشتید.", reply_markup=get_keyboard('root', is_admin))
         return CHOOSING
     
-    if text == "🔙 بازگشت":
-        parent = db[current_node_id].get('parent')
+    if text.startswith("🔙 بازگشت"):
+        parent = db[current_node_id].get("parent")
     
-        if parent:
-            context.user_data['current_node'] = parent
-            set_report_page(context, parent)
+        # تعیین نود مقصد
+        target_node = parent if parent else "root"
+        context.user_data["current_node"] = target_node
+        set_report_page(context, target_node)
     
-            await update.message.reply_text(
-                "بازگشت به عقب.",
-                reply_markup=get_keyboard(parent, is_admin)
-            )
+        if target_node == "root":
+            return_message = "🏠 خانه"
         else:
-            context.user_data['current_node'] = 'root'
-            set_report_page(context, "root")
+            bot_username = context.bot.username
+            path_str = get_breadcrumb_path(target_node, db, bot_username)
     
-            await update.message.reply_text(
-                "شما در صفحه اصلی هستید.",
-                reply_markup=get_keyboard('root', is_admin)
+            folder_name = db[target_node]["name"]
+    
+            return_message = (
+                f"📂 بازگشت به {folder_name}\n"
+                f"🗺 مسیر: {path_str}"
             )
     
+        await update.message.reply_text(
+            return_message,
+            reply_markup=get_keyboard(target_node, is_admin),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
         return CHOOSING
+
     
     # --- Admin Accessibility --- 
     if is_admin and text == os.getenv("ADMIN_ACCESSIBILITY_NAME"):
@@ -2485,25 +2581,35 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⛔️ چیزی برای بازگشت وجود ندارد.")
                 return CHOOSING
         
-            # وضعیت فعلی میره تو future
+            # ذخیره وضعیت فعلی دیتابیس در future
             future.append(copy.deepcopy(load_db()))
         
-            # آخرین snapshot
+            # لود کردن دیتابیس قبلی
             last_db = history.pop()
-        
             save_db(last_db)
+            
+            # پیدا کردن مناسب‌ترین نود پس از بازگرداندن بکاپ
+            current_node = context.user_data.get("current_node", "root")
+            valid_node = find_nearest_valid_node(last_db, current_node)
+            
+            # ذخیره نود معتبر جدید در سشن کاربر
+            context.user_data["current_node"] = valid_node
         
-            # 🔒 برای جلوگیری از کرش
-            context.user_data["current_node"] = "root"
-        
+            # دریافت نام پوشه و مسیر آن
+            bot_username = context.bot.username
+            path_str = get_breadcrumb_path(valid_node, last_db, bot_username)
+            node_name = last_db.get(valid_node, {}).get("name", "خانه")
+
             await update.message.reply_text(
-                "↩️ آخرین تغییر بازگردانده شد.",
-                reply_markup=get_keyboard("root", True)
+                f"↩️ آخرین تغییر بازگردانده شد.\n"
+                f"📂 پوشه فعلی: {node_name}\n"
+                f"🗺 مسیر: {path_str}",
+                reply_markup=get_keyboard(valid_node, True),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
             return CHOOSING
         
-        
-
         if text == "↪️" and is_admin:
             history = context.user_data.get("admin_history", [])
             future = context.user_data.get("admin_future", [])
@@ -2512,17 +2618,32 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⛔️ چیزی برای جلو رفتن نیست.")
                 return CHOOSING
         
-            # وضعیت فعلی بره history
+            # ذخیره وضعیت فعلی دیتابیس در history
             history.append(copy.deepcopy(load_db()))
         
+            # لود کردن دیتابیس بعدی
             next_db = future.pop()
             save_db(next_db)
         
-            context.user_data["current_node"] = "root"
+            # پیدا کردن مناسب‌ترین نود پس از بازگرداندن بکاپ
+            current_node = context.user_data.get("current_node", "root")
+            valid_node = find_nearest_valid_node(next_db, current_node)
+            
+            # ذخیره نود معتبر جدید در سشن کاربر
+            context.user_data["current_node"] = valid_node
         
+            # دریافت نام پوشه و مسیر آن
+            bot_username = context.bot.username
+            path_str = get_breadcrumb_path(valid_node, next_db, bot_username)
+            node_name = next_db.get(valid_node, {}).get("name", "خانه")
+
             await update.message.reply_text(
-                "↪️ تغییر دوباره اعمال شد.",
-                reply_markup=get_keyboard("root", True)
+                f"↪️ تغییر دوباره اعمال شد.\n"
+                f"📂 پوشه فعلی: {node_name}\n"
+                f"🗺 مسیر: {path_str}",
+                reply_markup=get_keyboard(valid_node, True),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
             return CHOOSING
         
@@ -2537,7 +2658,10 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
             # ✅ این صفحه برای report ذخیره شود
             set_report_page(context, child_id)
-    
+
+            bot_username = context.bot.username
+            path_str = get_breadcrumb_path(child_id, db, bot_username)
+            
             # 👤 کاربر عادی + دکمه بدون فرزند
             if not is_admin and not child_node.get("children"):
                 # فقط محتوا را نمایش بده، بدون تغییر صفحه
@@ -2548,14 +2672,31 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['current_node'] = child_id
     
             await update.message.reply_text(
-                f"📂 {child_node['name']}",
-                reply_markup=get_keyboard(child_id, is_admin)
+                f"📂 {child_node['name']}\n"
+                f"🗺 مسیر: {path_str}",
+                reply_markup=get_keyboard(child_id, is_admin),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
-    
             await send_node_contents(update, context, child_id)
             return CHOOSING
 
-    # ✅ اگر دکمه نبود، سرچ کن
+    # 🔍 چک کردن وضعیت سرچ هوشمند کاربر قبل از جستجو
+    user_id = str(update.effective_user.id)
+    userdata = load_userdata()
+    users = userdata.get("users", {})
+    # پیش‌فرض برای همه True (روشن) است. اگر فیلد smart_search_disabled معادل True باشد یعنی خاموش است.
+    is_disabled = users.get(user_id, {}).get("smart_search_disabled", False)
+    
+    if is_disabled:
+        ## اگر سرچ خاموش باشد، پاسخی ارسال نمی‌شود یا می‌توانید یک پیام ساده دهید:
+        #await update.message.reply_text(
+        #    "⚠️ سرچ هوشمند برای شما غیرفعال است.\n"
+        #    "برای فعال کردن مجدد آن از دستور /on_of_search استفاده کنید."
+        #)
+        return CHOOSING
+
+    # ✅ اگر دکمه نبود و سرچ هوشمند روشن بود، سرچ کن
     return await handle_smart_search(update, context, text, is_admin)
 
 async def rename_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2625,7 +2766,6 @@ async def set_admin_password(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
 async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-
     text = update.message.text
 
     if text in ["❌ لغو", "🔙 بازگشت"]:
@@ -2644,45 +2784,77 @@ async def restore_userdata(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_panel"] = "access"
         return CHOOSING
     
-    # بقیه کد ریستور userdata که قبلاً نوشته بودیم
 
+    # ------------------------------
+    # 📌 مرحله دریافت فایل
+    # ------------------------------
     doc = update.message.document
-    if not doc or not doc.file_name.endswith(".zip"):
-        await update.message.reply_text("❌ فایل ZIP معتبر نیست")
+    if not doc:
+        await update.message.reply_text("❌ لطفاً یک فایل ZIP یا JSON بفرستید.")
         return WAITING_USERDATA_UPLOAD
 
+    filename = doc.file_name.lower()
     file = await doc.get_file()
     file_bytes = await file.download_as_bytearray()
 
     try:
-        with zipfile.ZipFile(iolib.BytesIO(file_bytes)) as zipf:
-            if "userdata.json" not in zipf.namelist():
-                await update.message.reply_text("❌ userdata.json داخل فایل نیست")
-                return WAITING_USERDATA_UPLOAD
+        # ============================
+        # CASE 1: فایل مستقیم JSON
+        # ============================
+        if filename.endswith(".json"):
+            userdata = json.loads(file_bytes.decode("utf-8"))
+            save_userdata(userdata)
 
-            userdata = json.loads(zipf.read("userdata.json").decode("utf-8"))
+            context.user_data.pop("admin_waiting_from", None)
+            
+            await update.message.reply_text(
+                "✅ userdata.json با موفقیت بازیابی شد.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            
+            await update.message.reply_text(
+                "🔐 پنل مدیریت:",
+                reply_markup=get_admin_access_inline_keyboard()
+            )
+            context.user_data["admin_panel"] = "access"
 
-        save_userdata(userdata)
+            context.user_data.setdefault("current_node", "root")
+            return CHOOSING
 
-        context.user_data.pop("admin_waiting_from", None)
-        
-        await update.message.reply_text(
-            "✅ userdata با موفقیت بازیابی شد",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        await update.message.reply_text(
-            "🔐 پنل مدیریت:",
-            reply_markup=get_admin_access_inline_keyboard()
-        )
-        
-        context.user_data["admin_panel"] = "access"
-        
-        # current_node را دست نزن؛ اگر نبود، root بگذار
-        context.user_data.setdefault("current_node", "root")
-        
-        return CHOOSING
-        
+        # ============================
+        # CASE 2: فایل ZIP شامل userdata.json
+        # ============================
+        if filename.endswith(".zip"):
+
+            with zipfile.ZipFile(iolib.BytesIO(file_bytes)) as zipf:
+                if "userdata.json" not in zipf.namelist():
+                    await update.message.reply_text("❌ فایل ZIP فاقد userdata.json است.")
+                    return WAITING_USERDATA_UPLOAD
+
+                userdata = json.loads(zipf.read("userdata.json").decode("utf-8"))
+
+            save_userdata(userdata)
+
+            context.user_data.pop("admin_waiting_from", None)
+
+            await update.message.reply_text(
+                "✅ userdata از ZIP بازیابی شد.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+
+            await update.message.reply_text(
+                "🔐 پنل مدیریت:",
+                reply_markup=get_admin_access_inline_keyboard()
+            )
+
+            context.user_data["admin_panel"] = "access"
+            context.user_data.setdefault("current_node", "root")
+            return CHOOSING
+
+        # اگر هیچکدام نبود:
+        await update.message.reply_text("❌ فقط ZIP یا JSON قابل قبول است.")
+        return WAITING_USERDATA_UPLOAD
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در بازیابی:\n{e}")
         return WAITING_USERDATA_UPLOAD
@@ -2902,6 +3074,26 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ADMIN ACTIONS HANDLERS END === ADMIN ACTIONS HANDLERS === ADMIN ACTIONS HANDLERS END === ADMIN ACTIONS HANDLERS END === ADMIN ACTIONS HANDLERS END === ADMIN ACTIONS HANDLERS END= 
 
+def get_breadcrumb_path(node_id, db, bot_username):
+    """تولید مسیر لینک‌دار از روت تا نود فعلی"""
+    path_parts = []
+    curr_id = node_id
+    
+    # پیمایش به سمت بالا تا رسیدن به روت
+    while curr_id and curr_id != 'root' and curr_id in db:
+        name = db[curr_id]['name']
+        # لینک مستقیم به نود
+        link = f"https://t.me/{bot_username}?start={curr_id}"
+        path_parts.append(f'<a href="{link}">{name}</a>')
+        curr_id = db[curr_id].get('parent')
+    
+    # اضافه کردن آیکون خانه
+    path_parts.append(f'<a href="https://t.me/{bot_username}?start=root">🏠</a>')
+    
+    # معکوس کردن لیست برای نمایش درست (از روت به فرزند)
+    return " ⬅️ ".join(reversed(path_parts))
+
+
 def is_valid_node_id(text, db):
     return text in db and isinstance(db[text], dict)
 
@@ -2916,8 +3108,6 @@ async def show_reorder_keyboard(update, context, db):
         f"ترتیب جدید را انتخاب کنید ({len(remaining)} دکمه باقی مانده):",
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
     )
-
-
 
 
 async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3055,6 +3245,7 @@ async def receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_CONTENT
 
 async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     # لغو
     if update.message.text == "❌ لغو":
         current = context.user_data.get('current_node', 'root')
@@ -3065,48 +3256,71 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     document = update.message.document
-    if not document or not document.file_name.endswith(".zip"):
-        await update.message.reply_text("لطفاً یک فایل ZIP ارسال کنید.")
+    if not document:
+        await update.message.reply_text("❌ لطفاً ZIP یا JSON ارسال کنید.")
         return WAITING_RESTORE_FILE
 
+    filename = document.file_name.lower()
     file = await document.get_file()
     byte_array = await file.download_as_bytearray()
 
     try:
-        with zipfile.ZipFile(iolib.BytesIO(byte_array)) as zf:
-            # 🔍 پیدا کردن database.json بدون توجه به مسیر
-            db_name = None
-            for name in zf.namelist():
-                if name.endswith("database.json"):
-                    db_name = name
-                    break
-
-            if not db_name:
-                await update.message.reply_text(
-                    "❌ فایل database.json در بکاپ یافت نشد."
-                )
-                return WAITING_RESTORE_FILE
-
-            # ✅ نوشتن دیتابیس
+        # ============================
+        # CASE 1: فایل JSON مستقیم
+        # ============================
+        if filename.endswith(".json"):
             with open(DB_FILE, "wb") as f:
-                f.write(zf.read(db_name))
+                f.write(byte_array)
+
             upload_db_to_telegram()
 
-        # 🔥 پاک کردن لاگ تغییرات ادمین
-        context.user_data.pop("admin_history", None)
-        context.user_data.pop("admin_future", None)
+            context.user_data.pop("admin_history", None)
+            context.user_data.pop("admin_future", None)
+            context.user_data["current_node"] = "root"
 
-        context.user_data["current_node"] = "root"
+            await update.message.reply_text(
+                "✅ database.json با موفقیت وارد شد.",
+                reply_markup=get_keyboard("root", True)
+            )
+            return CHOOSING
 
-        await update.message.reply_text(
-            "✅ بکاپ با موفقیت وارد شد.\n"
-            "🔄 تاریخچه تغییرات پاک شد.",
-            reply_markup=get_keyboard("root", True)
-        )
-        return CHOOSING
+        # ============================
+        # CASE 2: فایل ZIP شامل database.json
+        # ============================
+        if filename.endswith(".zip"):
+
+            with zipfile.ZipFile(iolib.BytesIO(byte_array)) as zf:
+                db_name = None
+                for name in zf.namelist():
+                    if name.endswith("database.json"):
+                        db_name = name
+                        break
+
+                if not db_name:
+                    await update.message.reply_text("❌ فایل ZIP فاقد database.json است.")
+                    return WAITING_RESTORE_FILE
+
+                with open(DB_FILE, "wb") as f:
+                    f.write(zf.read(db_name))
+
+            upload_db_to_telegram()
+
+            context.user_data.pop("admin_history", None)
+            context.user_data.pop("admin_future", None)
+            context.user_data["current_node"] = "root"
+
+            await update.message.reply_text(
+                "✅ بکاپ ZIP با موفقیت وارد شد.",
+                reply_markup=get_keyboard("root", True)
+            )
+            return CHOOSING
+
+        # اگر هیچکدام نبود:
+        await update.message.reply_text("❌ فقط ZIP یا JSON قابل قبول است.")
+        return WAITING_RESTORE_FILE
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در بازگردانی: {e}")
+        await update.message.reply_text(f"❌ خطا در بازگردانی:\n{e}")
         return WAITING_RESTORE_FILE
 
 
@@ -3145,6 +3359,8 @@ def build_application():
         ),
         group=0
     )
+
+    application.add_handler(CommandHandler("on_of_search", toggle_smart_search), group=0)
 
     # ConversationHandler
     conv_handler = ConversationHandler(
