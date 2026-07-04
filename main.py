@@ -42,6 +42,7 @@ import requests
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from smart_search import smart_search
+from html import escape
 
 
 def delete_node_recursive(db, node_id):
@@ -81,18 +82,6 @@ PORT = int(os.environ.get("PORT", 10000))
 # ------ userdata -------
 USERDATA_FILE = "/tmp/userdata.json"
 
-# --- admin pannel
-ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
-
-# --- webhook_url مخصوص رندر
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-# توکن و آیدی عددی ادمین از متغیرهای محیطی خوانده می‌شود
-TOKEN = os.getenv("TOKEN")
-
-REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
-MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
-
 ADMIN_IDS = []
 if os.getenv("ADMIN_IDS"):
     ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS").split(",")))
@@ -127,11 +116,13 @@ logging.basicConfig(
     WAITING_BROADCAST_CONTENT,
     WAITING_SINGLE_USER_CONTENT,
     WAITING_PICK_USER_FOR_MSG,
-    WAITING_CHAT_MESSAGE 
-) = range(15)
+    WAITING_CHAT_MESSAGE, 
+    WAITING_REPORT_TEXT
+) = range(16)
 
 # ============ TELEGRAM USER API BACKUP CONFIG ============
-
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TOKEN = os.getenv("TOKEN")
 DB_FILE = "/tmp/database.json"
 USERDATA_FILE = "/tmp/userdata.json"
 
@@ -142,6 +133,10 @@ TG_SESSION_STRING = os.getenv("TG_SESSION_STRING")
 DB_BACKUP_CHAT_ID = int(os.getenv("DB_BACKUP_CHAT_ID", "0"))
 USERDATA_BACKUP_CHAT_ID = int(os.getenv("USERDATA_BACKUP_CHAT_ID", "0"))
 
+ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
+
+REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
+MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
 
 # ============ TELETHON SEPARATE EVENT LOOP ============
 
@@ -195,7 +190,7 @@ def run_telethon(coro):
 
 # ============ TELEGRAM FILE BACKUP HELPERS ============
 
-async def _upload_file_to_telegram(chat_id, file_path, caption=None):
+async def _upload_file_to_telegram(chat_id, file_path, caption=None, parse_mode=None):
     try:
         if not os.path.exists(file_path):
             print(f"❌ File not found for upload: {file_path}")
@@ -204,7 +199,8 @@ async def _upload_file_to_telegram(chat_id, file_path, caption=None):
         await telethon_client.send_file(
             entity=chat_id,
             file=file_path,
-            caption=caption or f"backup: {os.path.basename(file_path)}"
+            caption=caption or f"backup: {os.path.basename(file_path)}",
+            parse_mode=parse_mode  # ← ← ← پشتیبانی از HTML / Markdown
         )
 
         print(f"⬆️ Uploaded to Telegram group: {file_path}")
@@ -239,9 +235,9 @@ async def _download_latest_file_from_telegram(chat_id, filename, save_path):
         return False
 
 
-def upload_file_to_telegram(chat_id, file_path, caption=None):
+def upload_file_to_telegram(chat_id, file_path, caption=None, parse_mode=None):
     return run_telethon(
-        _upload_file_to_telegram(chat_id, file_path, caption)
+        _upload_file_to_telegram(chat_id, file_path, caption, parse_mode)
     )
 
 
@@ -261,11 +257,12 @@ def download_db_from_telegram():
     )
 
 
-def upload_db_to_telegram():
+def upload_db_to_telegram(caption="database.json"):
     return upload_file_to_telegram(
         chat_id=DB_BACKUP_CHAT_ID,
         file_path=DB_FILE,
-        caption="database.json"
+        caption=caption,
+        parse_mode="HTML"
     )
 
 
@@ -299,20 +296,24 @@ def load_db():
         return {}
 
 
-def save_db(data):
-    # ذخیره لوکال
+def save_db(data, context=None):
     try:
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
         print("💾 DB saved locally")
-
     except Exception as e:
         print("❌ Failed to save DB locally:", e)
         return False
 
-    # ارسال به گروه تلگرام
-    return upload_db_to_telegram()
+    # کپشن ادمین اگر وجود داشت → استفاده کن
+    caption = None
+    if context:
+        caption = pop_pending_caption(context)
+
+    if caption is None:
+        caption = "database.json"
+
+    return upload_db_to_telegram(caption=caption)
 
 
 # ============ USERDATA BACKUP WITH TELEGRAM ============
@@ -387,6 +388,10 @@ def track_user_activity(update: Update, count_message=True):
         return
 
     user_id = str(user.id)
+
+    # 🔥 مهم: اگر بن شده باشد، هیچ تغییر در userdata و فایل‌ها انجام نمی‌شود.
+    if is_user_banned(user.id):
+        return
 
     userdata = load_userdata()
     users = userdata.setdefault("users", {})
@@ -548,6 +553,36 @@ def build_user_action_keyboard(users_list, action="ban", page=0, page_size=8):
 
     return InlineKeyboardMarkup(keyboard)
 
+# ساخت لینک پوشه (دیپ‌لینک)
+def get_link(node_id, text, bot_username):
+    url = f"https://t.me/{bot_username}?start={node_id}"
+    return f"<a href='{url}'>{text}</a>"
+
+# ساخت لینک پروفایل ادمین
+def get_admin_link(admin_user):
+    return f"<a href='tg://user?id={admin_user.id}'>{admin_user.full_name}</a>"
+
+# ساخت کپشن کامل لاگ
+def format_admin_log(admin_user, description):
+    admin_link = get_admin_link(admin_user)
+    username = f"@{admin_user.username}" if admin_user.username else "بدون یوزرنیم"
+
+    return (
+        f"👑 <b>گزارش تغییرات دیتابیس</b>\n\n"
+        f"👤 ادمین: {admin_link}\n"
+        f"🆔 ID: <code>{admin_user.id}</code>\n"
+        f"👤 Username: {username}\n"
+        f"--------------------------\n"
+        f"{description}"
+    )
+
+# ذخیره کپشن در کانتکست (برای استفاده داخل save_db)
+def set_pending_caption(context, caption):
+    context.user_data["pending_caption"] = caption
+
+def pop_pending_caption(context):
+    return context.user_data.pop("pending_caption", None)
+
 #------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -565,6 +600,20 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/green": "success",
         "/red": "danger",
         "/none": None
+    }
+
+    color_names = {
+        "primary": "آبی",
+        "success": "سبز",
+        "danger": "قرمز",
+        None: "بدون رنگ"
+    }
+
+    command_color_names = {
+        "/green": "سبز",
+        "/blue": "آبی",
+        "/red": "قرمز",
+        "/none": "بدون رنگ"
     }
 
     if command not in styles:
@@ -585,29 +634,40 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     push_admin_history(context, db)
 
+    old_style = db[current_node_id].get("style")
+    old_color_name = color_names.get(old_style, "بدون رنگ")
+
     new_style = styles[command]
+    new_color_name = command_color_names[command]
 
     if new_style is None:
         db[current_node_id].pop("style", None)
     else:
         db[current_node_id]["style"] = new_style
 
-    save_db(db)
+    bot_username = context.bot.username
+    node_name = db[current_node_id]["name"]
+    node_link = get_link(current_node_id, node_name, bot_username)
+
+    desc = (
+        f"🎨 رنگ پوشه {node_link} "
+        f"از «{old_color_name}» به «{new_color_name}» تغییر کرد."
+    )
+
+    caption = format_admin_log(update.effective_user, desc)
+    set_pending_caption(context, caption)
+
+    save_db(db, context=context)
 
     parent_id = db[current_node_id].get("parent", "root")
     context.user_data["current_node"] = parent_id
 
-    color_names = {
-        "/green": "سبز",
-        "/blue": "آبی",
-        "/red": "قرمز",
-        "/none": "بدون رنگ"
-    }
-
     await update.message.reply_text(
-        f"✅ رنگ این پوشه به «{color_names[command]}» تغییر یافت.",
+        f"✅ رنگ این پوشه به «{new_color_name}» تغییر یافت.",
         reply_markup=get_keyboard(parent_id, True)
     )
+
+    return CHOOSING
 
 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
@@ -650,7 +710,7 @@ def get_keyboard(node_id, is_admin):
         # فعلاً به همون شکلی که داشتی گذاشتم که بهم نریزه
         keyboard.append(["➕ افزودن دکمه", "➕ افزودن محتوا"])
         keyboard.append(["🗑 حذف دکمه", "🧹 حذف محتوای صفحه"])
-        keyboard.append(["✏️ ویرایش نام دکمه", "🔑 دریافت هش و لینک دکمه", "🔀 جابه‌جایی چیدمان"])
+        keyboard.append(["✏️ ویرایش‌نام‌دکمه", "🔑 دریافت ‌هش‌ولینک‌دکمه", "🔀 جابه‌جایی‌چیدمان"])
         keyboard.append(["📥 دریافت بکاپ", "📤 وارد کردن بکاپ"])
         keyboard.append(["↩️", "↪️"])
 
@@ -737,7 +797,6 @@ def get_admin_password_inline_keyboard():
         ]
     ])
 
-
 def get_node_path_text(db, node_id, separator=" ⬅️ "):
     """
     مسیر کامل یک نود را از ریشه تا خودش می‌سازد.
@@ -775,11 +834,47 @@ def get_node_path_text(db, node_id, separator=" ⬅️ "):
 
     return separator.join(path)
 
+def get_node_path_html(db, node_id, bot_username, separator=" ⬅️ "):
+    """
+    مسیر کامل یک نود را از ریشه تا خودش به‌صورت لینک‌دار HTML می‌سازد.
+    اسم پوشه‌ها آبی و کلیک‌دار می‌شوند.
+    """
+
+    if node_id not in db:
+        return "مسیر نامشخص"
+
+    path = []
+    current_id = node_id
+    visited = set()
+
+    while current_id and current_id in db:
+        if current_id in visited:
+            break
+
+        visited.add(current_id)
+        node = db[current_id]
+
+        if current_id != "root":
+            name = escape(node.get("name", "بدون نام"))
+            link = f"https://t.me/{bot_username}?start={current_id}"
+            path.append(f'<a href="{link}">{name}</a>')
+
+        current_id = node.get("parent")
+
+    path.reverse()
+
+    if not path:
+        root_name = escape(db.get("root", {}).get("name", "خانه"))
+        return f'<a href="https://t.me/{bot_username}?start=root">{root_name}</a>'
+
+    return separator.join(path)
+
 def set_report_page(context: ContextTypes.DEFAULT_TYPE, node_id: str):
     """
     ذخیره صفحه فعلی برای قابلیت /report
     """
     context.user_data["current_report_node"] = node_id
+
 
 async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=False)
@@ -799,25 +894,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
 
     db = load_db()
-
-    # اولویت با صفحه‌ای است که برای ریپورت ذخیره شده
-    node_id = context.user_data.get("current_report_node")
-
-    # اگر نبود، از current_node استفاده کن
-    if not node_id:
-        node_id = context.user_data.get("current_node", "root")
-
-    if node_id not in db:
-        await update.message.reply_text("❌ صفحه فعلی برای گزارش پیدا نشد.")
-        return CHOOSING
-
-    node = db[node_id]
-
     bot_username = context.bot.username
-    deep_link = f"https://t.me/{bot_username}?start={node_id}"
-
-    page_name = html.escape(node.get("name", "بدون نام"))
-    path_text = html.escape(get_node_path_text(db, node_id))
 
     full_name = html.escape(user.full_name or "بدون نام")
     username = user.username
@@ -829,58 +906,281 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_link = f'<a href="tg://user?id={user.id}">{full_name}</a>'
 
-    report_text = (
-        "🚨 <b>گزارش صفحه</b>\n\n"
-        f"👤 <b>کاربر گزارش‌دهنده:</b> {user_link}\n"
-        f"🆔 <b>آیدی عددی کاربر:</b> <code>{user.id}</code>\n"
-        f"🔗 <b>یوزرنیم:</b> <code>{username_text}</code>\n\n"
-        f"📄 <b>نام صفحه:</b> {page_name}\n"
-        f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
-        f"🔑 <b>هش صفحه:</b>\n<code>{html.escape(node_id)}</code>\n\n"
-        f"🔗 <b>دیپ‌لینک صفحه:</b>\n{html.escape(deep_link)}"
-    )
-
-    user_reply = (
-        "✅ گزارش شما با موفقیت برای مدیریت ارسال شد.\n\n"
-        f"📄 <b>نام صفحه:</b> {page_name}\n"
-        f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
-        f"🔗 <b>دیپ‌لینک صفحه:</b>\n<code>{html.escape(deep_link)}</code>"
-    )
-    
     try:
-        await context.bot.send_message(
-            chat_id=REPORT_GROUP_ID,
-            text=report_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
+        # حالت 1: گزارش فایل/محتوا با ریپلای
+        if update.message.reply_to_message:
+            replied_msg_id = update.message.reply_to_message.message_id
+            sent_mapping = context.user_data.get("sent_mapping", {})
+            target = sent_mapping.get(replied_msg_id)
+
+            if not target:
+                await update.message.reply_text(
+                    "❌ امکان گزارش این فایل وجود ندارد.\n\n"
+                    "فقط فایل‌های مربوط به آخرین پوشه‌ای که باز کرده‌اید، قابل شناسایی و گزارش هستند. "
+                    "پس از باز کردن پوشه‌های دیگر، اطلاعات پوشه‌های قبلی از حافظه ربات حذف می‌شوند.\n\n"
+                    "برای گزارش یک فایل، ابتدا پوشه حاوی آن را باز کنید، سپس روی پیام همان فایل ریپلای کرده و دستور /report را ارسال کنید."
+                )
+                return CHOOSING
+
+            node_id = target.get("node_id")
+            content_index = target.get("content_index")
+
+            if node_id not in db:
+                await update.message.reply_text("❌ پوشه مربوط به این محتوا پیدا نشد.")
+                return CHOOSING
+
+            contents = db[node_id].get("contents", [])
+            if not (0 <= content_index < len(contents)):
+                await update.message.reply_text("❌ فایل یا محتوای موردنظر دیگر در این پوشه وجود ندارد.")
+                return CHOOSING
+
+            node = db[node_id]
+            item = contents[content_index]
+
+            page_name = html.escape(node.get("name", "بدون نام"))
+            path_text = html.escape(get_node_path_text(db, node_id))
+
+            content_type = item.get("type", "unknown")
+            content_type_map = {
+                "text": "متن",
+                "photo": "عکس",
+                "video": "ویدیو",
+                "document": "فایل",
+                "audio": "صوت",
+                "voice": "ویس",
+            }
+            content_type_text = content_type_map.get(content_type, content_type)
+
+            deep_link = f"https://t.me/{bot_username}?start=file__{node_id}__{content_index}"
+
+            caption_or_text = ""
+            if content_type == "text":
+                caption_or_text = item.get("text", "") or ""
+            else:
+                caption_or_text = item.get("caption", "") or ""
+
+            caption_or_text = caption_or_text.strip()
+            if len(caption_or_text) > 700:
+                caption_or_text = caption_or_text[:700] + "..."
+
+            content_preview = html.escape(caption_or_text) if caption_or_text else "ندارد"
+            file_hash = html.escape(f"{node_id}__{content_index}")
+
+            report_text = (
+                "🚨 <b>گزارش فایل / محتوا</b>\n\n"
+                f"👤 <b>کاربر گزارش‌دهنده:</b> {user_link}\n"
+                f"🆔 <b>آیدی عددی کاربر:</b> <code>{user.id}</code>\n"
+                f"🔗 <b>یوزرنیم:</b> {username_text}\n\n"
+                f"📂 <b>نام پوشه:</b> {page_name}\n"
+                f"📍 <b>مسیر پوشه:</b>\n{path_text}\n\n"
+                f"🗂 <b>نوع محتوا:</b> {html.escape(content_type_text)}\n"
+                f"🔢 <b>اندیس محتوا:</b> <code>{content_index}</code>\n"
+                f"🔑 <b>هش محتوا:</b>\n<code>{file_hash}</code>\n\n"
+                f"📝 <b>متن/کپشن:</b>\n{content_preview}\n\n"
+                f"🔗 <b>دیپ‌لینک فایل:</b>\n{html.escape(deep_link)}"
+            )
+
+            user_reply = (
+                "✅ گزارش فایل برای مدیریت ارسال شد.\n\n"
+                f"🗂 <b>نوع محتوا:</b> {html.escape(content_type_text)}\n"
+                f"📂 <b>نام پوشه:</b> {page_name}\n"
+                f"📍 <b>مسیر پوشه:</b>\n{path_text}\n\n"
+                f"🔗 <b>دیپ‌لینک فایل:</b>\n<code>{html.escape(deep_link)}</code>\n\n"
+                f"📝 <b>متن گزارش:</b>\n{content_preview}"
+            )
+
+            set_pending_report(context, {
+                "report_text": report_text,
+                "user_reply": user_reply,
+            })
+
+            await update.message.reply_text(
+                "📝 متن گزارش را ارسال کنید.\n"
+                "اگر نمی‌خواهید متنی اضافه شود، دستور /no_messager را بزنید.\n"
+                "برای لغو کامل گزارش، دستور /cansel را بزنید."
+            )
+            return WAITING_REPORT_TEXT
+
+        # حالت 2: گزارش صفحه/پوشه
+        node_id = context.user_data.get("current_report_node")
+        if not node_id:
+            node_id = context.user_data.get("current_node", "root")
+
+        if node_id not in db:
+            await update.message.reply_text("❌ صفحه فعلی برای گزارش پیدا نشد.")
+            return CHOOSING
+
+        node = db[node_id]
+        deep_link = f"https://t.me/{bot_username}?start={node_id}"
+
+        page_name = html.escape(node.get("name", "بدون نام"))
+        path_text = html.escape(get_node_path_text(db, node_id))
+
+        report_text = (
+            "🚨 <b>گزارش صفحه</b>\n\n"
+            f"👤 <b>کاربر گزارش‌دهنده:</b> {user_link}\n"
+            f"🆔 <b>آیدی عددی کاربر:</b> <code>{user.id}</code>\n"
+            f"🔗 <b>یوزرنیم:</b> {username_text}\n\n"
+            f"📄 <b>نام صفحه:</b> {page_name}\n"
+            f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
+            f"🔑 <b>هش صفحه:</b>\n<code>{html.escape(node_id)}</code>\n\n"
+            f"🔗 <b>دیپ‌لینک صفحه:</b>\n{html.escape(deep_link)}"
         )
 
-        await update.message.reply_text(user_reply, parse_mode="HTML")
+        user_reply = (
+            "✅ گزارش شما با موفقیت برای مدیریت ارسال شد.\n\n"
+            f"📄 <b>نام صفحه:</b> {page_name}\n"
+            f"📂 <b>مسیر صفحه:</b>\n{path_text}\n\n"
+            f"🔗 <b>دیپ‌لینک صفحه:</b>\n<code>{html.escape(deep_link)}</code>\n\n"
+            f"📝 <b>متن گزارش:</b>\n{content_preview}"
+        )
+
+        set_pending_report(context, {
+            "report_text": report_text,
+            "user_reply": user_reply,
+        })
+
+        await update.message.reply_text(
+            "📝 متن گزارش را ارسال کنید.\n"
+            "اگر نمی‌خواهید متنی اضافه شود، دستور /no_messager را بزنید.\n"
+            "برای لغو کامل گزارش، دستور /cansel را بزنید."
+        )
+        return WAITING_REPORT_TEXT
 
     except Exception as e:
-        print("Failed to send report:", e)
-        await update.message.reply_text("❌ ارسال گزارش با خطا مواجه شد.")
+        print("Failed to prepare report:", e)
+        clear_pending_report(context)
+        await update.message.reply_text("❌ آماده‌سازی گزارش با خطا مواجه شد.")
+        return CHOOSING
 
+async def receive_report_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+
+    user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        clear_pending_report(context)
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
+
+    if not get_pending_report(context):
+        await update.message.reply_text("❌ گزارشی در انتظار ارسال نیست.")
+        return CHOOSING
+
+    report_message_text = (update.message.text or "").strip()
+    return await send_pending_report(update, context, report_message_text)
+
+
+async def report_without_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+
+    user_id = update.effective_user.id
+    if is_user_banned(user_id):
+        clear_pending_report(context)
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
+
+    if not get_pending_report(context):
+        await update.message.reply_text("❌ گزارشی در انتظار ارسال نیست.")
+        return CHOOSING
+
+    return await send_pending_report(update, context, "")
+
+
+async def cancel_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    track_user_activity(update, count_message=False)
+
+    clear_pending_report(context)
+    await update.message.reply_text("❌ ارسال گزارش لغو شد.")
     return CHOOSING
+
+
+async def send_single_content_by_item(message, item):
+    msg_type = item["type"]
+    saved_entities = item.get("entities")
+
+    if msg_type == "text":
+        if saved_entities is not None:
+            return await message.reply_text(
+                text=item["text"],
+                entities=saved_entities
+            )
+        else:
+            return await message.reply_text(
+                text=item["text"],
+                parse_mode="HTML"
+            )
+
+    file_id = item["file_id"]
+    caption = item.get("caption", "")
+
+    send_args = {"caption": caption}
+    if saved_entities is not None:
+        send_args["caption_entities"] = saved_entities
+    else:
+        send_args["parse_mode"] = "HTML"
+
+    if msg_type == "photo":
+        return await message.reply_photo(photo=file_id, **send_args)
+    elif msg_type == "video":
+        return await message.reply_video(video=file_id, **send_args)
+    elif msg_type == "document":
+        return await message.reply_document(document=file_id, **send_args)
+    elif msg_type == "audio":
+        return await message.reply_audio(audio=file_id, **send_args)
+    elif msg_type == "voice":
+        return await message.reply_voice(voice=file_id, **send_args)
+
+    return None
 
 async def deeplink_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=False)
-    
+
     user_id = update.effective_user.id
     if is_user_banned(user_id):
         await update.message.reply_text("⛔️ شما بن شده‌اید.")
         return CHOOSING
 
     db = load_db()
-    
-    # اولویت با صفحه‌ای است که کاربر در آن است
+    bot_username = context.bot.username
+
+    # اگر روی پیام ربات ریپلای شده باشد => دیپ‌لینک فایل
+    if update.message.reply_to_message:
+        replied_msg_id = update.message.reply_to_message.message_id
+        sent_mapping = context.user_data.get("sent_mapping", {})
+        target = sent_mapping.get(replied_msg_id)
+
+        if target:
+            node_id = target["node_id"]
+            content_index = target["content_index"]
+
+            if node_id in db and 0 <= content_index < len(db[node_id].get("contents", [])):
+                page_name = html.escape(db[node_id].get("name", "بدون نام"))
+                deep_link = f"https://t.me/{bot_username}?start=file__{node_id}__{content_index}"
+
+                msg = (
+                    f"🔗 <b>دیپ‌لینک فایل:</b> <code>{page_name}</code>\n\n"
+                    f"برای اشتراک‌گذاری، روی لینک زیر بزنید:\n"
+                    f"<code>{html.escape(deep_link)}</code>"
+                )
+                await update.message.reply_text(msg, parse_mode="HTML")
+                return CHOOSING
+
+        await update.message.reply_text("❌ این پیام فایلِ قابل‌شناسایی از حافظه ربات نیست.")
+        return CHOOSING
+
+    # حالت عادی: دیپ‌لینک پوشه
     node_id = context.user_data.get("current_report_node") or context.user_data.get("current_node", "root")
 
     if node_id not in db:
         await update.message.reply_text("❌ صفحه فعلی پیدا نشد.")
         return CHOOSING
 
-    bot_username = context.bot.username
     deep_link = f"https://t.me/{bot_username}?start={node_id}"
     page_name = html.escape(db[node_id].get("name", "بدون نام"))
 
@@ -979,32 +1279,166 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
     set_report_page(context, node_id)
     db = load_db()
     contents = db[node_id].get("contents", [])
-    
+
     if not contents:
         return
 
-    for item in contents:
+    if "sent_mapping" not in context.user_data:
+        context.user_data["sent_mapping"] = {}
+
+    for index, item in enumerate(contents):
         try:
             msg_type = item['type']
+            saved_entities = item.get('entities')
+            sent_msg = None
+
             if msg_type == 'text':
-                await update.message.reply_text(item['text'], parse_mode="HTML")
+                if saved_entities is not None:
+                    sent_msg = await update.message.reply_text(
+                        text=item['text'],
+                        entities=saved_entities
+                    )
+                else:
+                    sent_msg = await update.message.reply_text(
+                        text=item['text'],
+                        parse_mode="HTML"
+                    )
             else:
                 file_id = item['file_id']
                 caption = item.get('caption', '')
-            
+
+                send_args = {
+                    "caption": caption
+                }
+
+                if saved_entities is not None:
+                    send_args["caption_entities"] = saved_entities
+                else:
+                    send_args["parse_mode"] = "HTML"
+
                 if msg_type == 'photo':
-                    await update.message.reply_photo(photo=file_id, caption=caption, parse_mode="HTML")
+                    sent_msg = await update.message.reply_photo(photo=file_id, **send_args)
                 elif msg_type == 'video':
-                    await update.message.reply_video(video=file_id, caption=caption, parse_mode="HTML")
+                    sent_msg = await update.message.reply_video(video=file_id, **send_args)
                 elif msg_type == 'document':
-                    await update.message.reply_document(document=file_id, caption=caption, parse_mode="HTML")
+                    sent_msg = await update.message.reply_document(document=file_id, **send_args)
                 elif msg_type == 'audio':
-                    await update.message.reply_audio(audio=file_id, caption=caption, parse_mode="HTML")
+                    sent_msg = await update.message.reply_audio(audio=file_id, **send_args)
                 elif msg_type == 'voice':
-                    await update.message.reply_voice(voice=file_id, caption=caption, parse_mode="HTML")
+                    sent_msg = await update.message.reply_voice(voice=file_id, **send_args)
+
+            # mapping ذخیره شود
+            if sent_msg:
+                context.user_data["sent_mapping"][sent_msg.message_id] = {
+                    "node_id": node_id,
+                    "content_index": index
+                }
+
         except Exception as e:
             logging.error(f"Error sending content: {e}")
-            
+
+
+async def handle_reply_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
+
+    if not is_admin:
+        return
+
+    # بررسی اینکه آیا روی پیامی ریپلای شده است
+    if not msg.reply_to_message:
+        await msg.reply_text("⚠️ لطفاً این دستور را روی یکی از پیام‌های ارسالی ربات ریپلای کنید.")
+        return
+
+    target_msg_id = msg.reply_to_message.message_id
+    mapping = context.user_data.get("sent_mapping", {}).get(target_msg_id)
+
+    if not mapping:
+        await msg.reply_text("⚠️ این فایل در حافظه موقت ربات پیدا نشد یا مربوط به پوشه دیگری است.")
+        return
+
+    current_node = context.user_data.get("current_node", "root")
+    # بررسی شرط: فایل فقط در پوشه‌ای که ادمین در آن حضور دارد حذف شود
+    if mapping["node_id"] != current_node:
+        await msg.reply_text("⚠️ شما فقط می‌توانید فایل‌های مربوط به پوشه فعلی خود را حذف کنید.")
+        return
+
+    db = load_db()
+    node_id = mapping["node_id"]
+    idx = mapping["content_index"]
+
+    if node_id in db and "contents" in db[node_id] and len(db[node_id]["contents"]) > idx:
+        push_admin_history(context, db)
+        
+        # ارسال لوگ ادمین
+        bot_username = context.bot.username
+        node_name = db[node_id]["name"]
+        node_link = get_link(node_id, node_name, bot_username)
+        desc = f"🗑 یک فایل از پوشه {node_link} حذف شد."
+        caption = format_admin_log(update.effective_user, desc)
+        set_pending_caption(context, caption)
+
+        # حذف آیتم از لیست
+        removed_item = db[node_id]["contents"].pop(idx)
+        save_db(db, context=context)
+
+        # پاک کردن کلیدهای نگاشت برای پیام‌های بعد از این ایندکس چون چیدمان لیست عوض شده است
+        context.user_data["sent_mapping"] = {
+            k: v for k, v in context.user_data.get("sent_mapping", {}).items() 
+            if v["node_id"] != node_id
+        }
+
+        await msg.reply_text("✅ فایل با موفقیت از دیتابیس این پوشه حذف شد.")
+    else:
+        await msg.reply_text("⚠️ خطا در دسترسی به اطلاعات فایل در دیتابیس.")
+
+async def handle_reply_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
+
+    if not is_admin:
+        return
+
+    if not msg.reply_to_message:
+        await msg.reply_text("⚠️ لطفاً این دستور را روی یکی از پیام‌های ارسالی ربات ریپلای کنید.")
+        return
+
+    target_msg_id = msg.reply_to_message.message_id
+    mapping = context.user_data.get("sent_mapping", {}).get(target_msg_id)
+
+    if not mapping:
+        await msg.reply_text("⚠️ این فایل در حافظه موقت ربات پیدا نشد یا مربوط به پوشه دیگری است.")
+        return
+
+    current_node = context.user_data.get("current_node", "root")
+    if mapping["node_id"] != current_node:
+        await msg.reply_text("⚠️ شما فقط می‌توانید فایل‌های مربوط به پوشه فعلی خود را تغییر دهید.")
+        return
+
+    # ذخیره اطلاعات برای جایگزینی بعدی
+    context.user_data["change_target"] = {
+        "node_id": mapping["node_id"],
+        "content_index": mapping["content_index"]
+    }
+    
+    # ورود به حالت بافر موقت
+    context.user_data['temp_content'] = []
+
+    await msg.reply_text(
+        "🔄 فایل یا فایل‌های جدیدی که می‌خواهید جایگزین این فایل شوند را ارسال کنید.\n"
+        "پس از اتمام کار، دکمه '✅ ثبت نهایی' را بزنید تا جایگزین شود.",
+        reply_markup=ReplyKeyboardMarkup([["✅ ثبت نهایی", "❌ لغو"]], resize_keyboard=True)
+    )
+    
+    # تغییر وضعیت Conversation به انتظار دریافت محتوا
+    return WAITING_CONTENT
+
 def get_subtree_db(db, root_node_id):
     subtree = {}
 
@@ -1050,12 +1484,18 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     results = smart_search(subtree_db, text, limit=5, min_score=45)
 
     help_text = (
-        "\n\n⚙️ برای خاموش یا روشن کردن سرچ هوشمند، از دستور /on_of_search استفاده کنید.\n"
+        "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_of_search استفاده کنید."
     )
 
     if not results:
         await update.message.reply_text(
-            "🔍 نتیجه‌ای در این پوشه یافت نشد." + help_text,
+            f"""🔍 نتیجه‌ای در این پوشه یافت نشد.
+        
+        ⚠️ توجه!
+        فقط مسیرهای موجود در پوشه فعلی جستجو می‌شوند.
+        برای جستجوی کل کتابخانه، ابتدا به صفحه اصلی بروید.
+        
+        {help_text}""",
             parse_mode="HTML"
         )
         return CHOOSING
@@ -1075,7 +1515,7 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg += f"📂 <a href='{deep_link}'>{path_text}</a>\n"
         msg += f"درصد تطابق: {int(item['score'])}٪\n\n"
 
-    msg += "روی مسیر آبی‌رنگ کلیک کنید تا مستقیم به آنجا بروید."
+    msg += " 🪄 روی مسیر آبی‌رنگ کلیک کنید تا مستقیم به آنجا بروید. /n"
     msg += help_text
 
     await update.message.reply_text(
@@ -1156,11 +1596,97 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     # پاک‌سازی کامل وضعیت قبلی
-    context.user_data.clear()
+    #old_current_node = context.user_data.get("current_node", "root")
+
+    # فقط داده‌های موقتی پاک شوند
+    context.user_data.pop("temp_content", None)
+    context.user_data.pop("change_target", None)
+    context.user_data.pop("current_report_node", None)
 
     db = load_db()
 
     args = context.args  # 👈 payload اینجاست
+        # اگر دیپ‌لینک فایل باشد
+    if args:
+        payload = args[0]
+
+        if payload.startswith("file__"):
+            parts = payload.split("__", 2)
+            if len(parts) == 3:
+                _, node_id, index_str = parts
+                db = load_db()
+
+                if node_id in db:
+                    try:
+                        content_index = int(index_str)
+                    except ValueError:
+                        await update.message.reply_text("❌ لینک فایل نامعتبر است.")
+                        return CHOOSING
+
+                    contents = db[node_id].get("contents", [])
+                    if 0 <= content_index < len(contents):
+                        bot_username = context.bot.username
+                        path_text = get_node_path_html(db, node_id, bot_username)
+
+                        # فقط مسیر را نشان بده، بدون تغییر current_node
+                        current_node = context.user_data.get("current_node", "root")
+
+                        await update.message.reply_text(
+                            f"📂 مسیر فایل:\n{path_text}",
+                            reply_markup=get_keyboard(current_node, is_admin),
+                            parse_mode="HTML",
+                            disable_web_page_preview=True
+                        )
+
+                        item = contents[content_index]
+                        try:
+                            msg_type = item["type"]
+                            saved_entities = item.get("entities")
+
+                            if msg_type == "text":
+                                if saved_entities is not None:
+                                    await update.message.reply_text(
+                                        text=item["text"],
+                                        entities=saved_entities
+                                    )
+                                else:
+                                    await update.message.reply_text(
+                                        text=item["text"],
+                                        parse_mode="HTML"
+                                    )
+                            else:
+                                file_id = item["file_id"]
+                                caption = item.get("caption", "")
+
+                                send_args = {"caption": caption}
+                                if saved_entities is not None:
+                                    send_args["caption_entities"] = saved_entities
+                                else:
+                                    send_args["parse_mode"] = "HTML"
+
+                                if msg_type == "photo":
+                                    await update.message.reply_photo(photo=file_id, **send_args)
+                                elif msg_type == "video":
+                                    await update.message.reply_video(video=file_id, **send_args)
+                                elif msg_type == "document":
+                                    await update.message.reply_document(document=file_id, **send_args)
+                                elif msg_type == "audio":
+                                    await update.message.reply_audio(audio=file_id, **send_args)
+                                elif msg_type == "voice":
+                                    await update.message.reply_voice(voice=file_id, **send_args)
+
+                        except Exception as e:
+                            logging.error(f"Error sending deeplink file: {e}")
+                            await update.message.reply_text("❌ خطا در ارسال فایل.")
+
+                        # current_node را تغییر نده
+                        if "current_node" not in context.user_data:
+                            context.user_data["current_node"] = "root"
+
+                        return CHOOSING
+
+            await update.message.reply_text("❌ لینک فایل نامعتبر است.")
+            return CHOOSING
 
     # 🔗 اگر start با هش اومده
     if args:
@@ -1175,12 +1701,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not is_admin and not has_children:
                 parent_id = target_node.get("parent") or "root"
                 context.user_data["current_node"] = parent_id
-
-                path_text = get_node_path_text(db, target_id)
+                bot_username = context.bot.username
+                path_text = get_node_path_html(db, target_id, bot_username)
 
                 await update.message.reply_text(
                     f"📂 مسیر:\n{path_text}",
-                    reply_markup=get_keyboard(parent_id, is_admin)
+                    reply_markup=get_keyboard(parent_id, is_admin),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
                 )
 
                 await send_node_contents(update, context, target_id)
@@ -1188,12 +1716,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # 👑 ادمین، یا نودی که فرزند دارد => خود پوشه باز شود
             context.user_data["current_node"] = target_id
-
-            path_text = get_node_path_text(db, target_id)
+            bot_username = context.bot.username
+            path_text = get_node_path_html(db, target_id, bot_username)
 
             await update.message.reply_text(
                 f"📂 مسیر:\n{path_text}",
-                reply_markup=get_keyboard(target_id, is_admin)
+                reply_markup=get_keyboard(target_id, is_admin),
+                parse_mode="HTML",
+                disable_web_page_preview=True
             )
 
             await send_node_contents(update, context, target_id)
@@ -1204,22 +1734,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات دانشگاه خوش آمدید. (V_4.5.15)
+        """🕊 به ربات کتابخانه دانشگاه خوش آمدید.
     
-    🔍 برای یافتن فایل مورد نظر، میتوانید به صورت متنی سرچ کنید.
-           مثل: وویس جلسه اول باکتری شناسی بهمن 403، جزوه فیزیولوژی کلیه و...
-           یا اینکه از دکمه‌های آماده استفاده کنید.
-
-    ⚙️ برای خاموش و روشن کردن سرچ هوشمند، از کامند /on_of_search استفاده کنید.
-
-    🤝 درصورت مشاهده اشکال در محتوای پوشه‌ها، می‌توانید با دستور /report، محتوای آخرین پوشه‌ای که در آن بودید را به ما گزارش دهید و در توسعه محتوای ربات، کمکمان کنید.
-
-    🔗 جهت دریافت لینک هر پوشه و اشتراک گذاری آن، از دستور /deeplink استفاده کنید. 
-
-    👨‍💻 پیشنهادات و انتقادات خود را با ما، درمیان بگذارید. پیام به ادمین: /chat """,
-
-        reply_markup=get_keyboard("root", is_admin)
+    <blockquote>
+    🔍 <b>جستجوی فایل‌ها</b>
+    برای پیدا کردن فایل موردنظر، کافی است نام یا توضیح آن را به‌صورت متنی ارسال کنید؛ برای مثال:
+    • وویس جلسه اول باکتری‌شناسی بهمن ۴۰۳
+    • جزوه فیزیولوژی کلیه
+    • اسلاید پاتولوژی و ...
+    
+    همچنین می‌توانید از دکمه‌های آماده ربات نیز استفاده کنید.
+    
+    ⚙️ <b>جستجوی هوشمند</b>
+    برای فعال یا غیرفعال کردن جستجوی هوشمند، از دستور <code>/on_of_search</code> استفاده کنید.
+    
+    🤝 <b>گزارش اشکالات</b>
+    • برای گزارش یک پوشه، دستور <code>/report</code> را در همان پوشه ارسال کنید.
+    • برای گزارش یک فایل، روی پیام همان فایل ریپلای کرده و سپس دستور <code>/report</code> را ارسال کنید.
+    
+    🔗 <b>دریافت دیپ‌لینک</b>
+    • برای دریافت لینک یک پوشه، وارد همان پوشه شوید و دستور <code>/deeplink</code> را ارسال کنید.
+    • برای دریافت لینک یک فایل، روی پیام همان فایل ریپلای کرده و سپس دستور <code>/deeplink</code> را ارسال کنید.
+    
+    👨‍💻 <b>ارتباط با مدیر</b>
+    پیشنهادها، انتقادات و گزارش‌های خود را از طریق دستور <code>/chat</code> با ما در میان بگذارید.
+    
+    📌 نسخه: V_4.6.16
+    </blockquote>""",
+        reply_markup=get_keyboard("root", is_admin),
+        parse_mode="HTML"
     )
+
     return CHOOSING
 
 async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2310,7 +2855,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
             return_message = (
                 f"📂 بازگشت به {folder_name}\n"
-                f"🗺 مسیر: {path_str}"
+                f"<blockquote expandable>🗺 مسیر: {path_str}</blockquote>"
             )
     
         await update.message.reply_text(
@@ -2409,8 +2954,16 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
                 # حذف بازگشتی کل درخت
                 delete_node_recursive(db, target_id)
-            
-                save_db(db)
+
+                bot_username = context.bot.username
+                parent_name = db[current_node_id]["name"]
+                parent_link = get_link(current_node_id, parent_name, bot_username)
+                child_link = get_link(target_id, target_name, bot_username)
+                desc = f"❌ پوشه {child_link} از {parent_link} حذف شد."
+                caption = format_admin_log(update.effective_user, desc)
+                set_pending_caption(context, caption)
+                
+                save_db(db, context=context)
                 await update.message.reply_text(
                     f"دکمه '{target_name}' و تمام زیرمجموعه‌هایش حذف شد.",
                     reply_markup=get_keyboard(current_node_id, is_admin)
@@ -2436,7 +2989,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("فایل ZIP بکاپ را ارسال کنید:", reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True))
             return WAITING_RESTORE_FILE
 
-        if text == "✏️ ویرایش نام دکمه":
+        if text == "✏️ ویرایش‌نام‌دکمه":
             children = db[current_node_id].get("children", [])
             if not children:
                 await update.message.reply_text("دکمه‌ای برای ویرایش وجود ندارد.")
@@ -2468,14 +3021,22 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "🧹 حذف محتوای صفحه":
             push_admin_history(context, db)
             db[current_node_id]["contents"] = []
-            save_db(db)
+
+            bot_username = context.bot.username
+            node_name = db[current_node_id]["name"]
+            node_link = get_link(current_node_id, node_name, bot_username)
+            desc = f"🧹 محتوای پوشه {node_link} حذف شد."
+            caption = format_admin_log(update.effective_user, desc)
+            set_pending_caption(context, caption)
+            
+            save_db(db, context=context)
             await update.message.reply_text(
                 "🧹 محتوای این صفحه حذف شد.",
                 reply_markup=get_keyboard(current_node_id, True)
             )
             return CHOOSING
 
-        if text == "🔑 دریافت هش و لینک دکمه":
+        if text == "🔑 دریافت ‌هش‌ولینک‌دکمه":
             children = db[current_node_id].get("children", [])
             if not children:
                 await update.message.reply_text("دکمه‌ای وجود ندارد.")
@@ -2518,7 +3079,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return CHOOSING
         
 
-        if text == "🔀 جابه‌جایی چیدمان":
+        if text == "🔀 جابه‌جایی‌چیدمان":
             children = db[current_node_id].get("children", [])
             if len(children) < 2:
                 await update.message.reply_text("برای جابه‌جایی حداقل دو دکمه لازم است.")
@@ -2562,7 +3123,15 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # ✅ پایان انتخاب و ذخیره چیدمان جدید
                 push_admin_history(context, db)
                 db[current_node_id]["children"] = result
-                save_db(db)
+
+                bot_username = context.bot.username
+                node_name = db[current_node_id]["name"]
+                node_link = get_link(current_node_id, node_name, bot_username)
+                desc = f"🔀 چیدمان دکمه‌های پوشه {node_link} تغییر کرد."
+                caption = format_admin_log(update.effective_user, desc)
+                set_pending_caption(context, caption)
+                
+                save_db(db, context=context)
         
                 for key in ["reorder_remaining", "reorder_result", "reorder_mode"]:
                     context.user_data.pop(key, None)
@@ -2581,25 +3150,25 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("⛔️ چیزی برای بازگشت وجود ندارد.")
                 return CHOOSING
         
-            # ذخیره وضعیت فعلی دیتابیس در future
             future.append(copy.deepcopy(load_db()))
         
-            # لود کردن دیتابیس قبلی
             last_db = history.pop()
-            save_db(last_db)
-            
-            # پیدا کردن مناسب‌ترین نود پس از بازگرداندن بکاپ
+        
             current_node = context.user_data.get("current_node", "root")
             valid_node = find_nearest_valid_node(last_db, current_node)
-            
-            # ذخیره نود معتبر جدید در سشن کاربر
             context.user_data["current_node"] = valid_node
         
-            # دریافت نام پوشه و مسیر آن
             bot_username = context.bot.username
             path_str = get_breadcrumb_path(valid_node, last_db, bot_username)
             node_name = last_db.get(valid_node, {}).get("name", "خانه")
-
+            node_link = get_link(valid_node, node_name, bot_username)
+        
+            desc = f"↩️ آخرین تغییر بازگردانده شد. پوشه فعلی: {node_link}"
+            caption = format_admin_log(update.effective_user, desc)
+            set_pending_caption(context, caption)
+        
+            save_db(last_db, context=context)
+        
             await update.message.reply_text(
                 f"↩️ آخرین تغییر بازگردانده شد.\n"
                 f"📂 پوشه فعلی: {node_name}\n"
@@ -2623,7 +3192,6 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
             # لود کردن دیتابیس بعدی
             next_db = future.pop()
-            save_db(next_db)
         
             # پیدا کردن مناسب‌ترین نود پس از بازگرداندن بکاپ
             current_node = context.user_data.get("current_node", "root")
@@ -2636,7 +3204,13 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_username = context.bot.username
             path_str = get_breadcrumb_path(valid_node, next_db, bot_username)
             node_name = next_db.get(valid_node, {}).get("name", "خانه")
+            node_link = get_link(valid_node, node_name, bot_username)
+            desc = f"↪️ تغییر دوباره اعمال شد. پوشه فعلی: {node_link}"
+            caption = format_admin_log(update.effective_user, desc)
+            set_pending_caption(context, caption)
 
+            save_db(next_db, context=context)
+            
             await update.message.reply_text(
                 f"↪️ تغییر دوباره اعمال شد.\n"
                 f"📂 پوشه فعلی: {node_name}\n"
@@ -2673,7 +3247,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
             await update.message.reply_text(
                 f"📂 {child_node['name']}\n"
-                f"🗺 مسیر: {path_str}",
+                f"<blockquote expandable>🗺 مسیر: {path_str}</blockquote>",
                 reply_markup=get_keyboard(child_id, is_admin),
                 parse_mode="HTML",
                 disable_web_page_preview=True
@@ -2712,7 +3286,17 @@ async def rename_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_id in db:
         push_admin_history(context, db)  # 👈 اینجا
         db[target_id]["name"] = new_name
-        save_db(db)
+
+        old_name = db[target_id]["name"]
+        new_name = update.message.text
+        bot_username = context.bot.username
+        old_link = get_link(target_id, old_name, bot_username)
+        new_link = get_link(target_id, new_name, bot_username)
+        desc = f"📝 نام پوشه {old_link} به {new_link} تغییر کرد."
+        caption = format_admin_log(update.effective_user, desc)
+        set_pending_caption(context, caption)
+
+        save_db(db, context=context)
 
     current = context.user_data.get("current_node", "root")
     await update.message.reply_text("✅ نام دکمه ویرایش شد.", reply_markup=get_keyboard(current, True))
@@ -3119,6 +3703,7 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db = load_db()
     current_node_id = context.user_data.get('current_node', 'root')
+    bot_username = context.bot.username
 
     # 🧠 اگر هش معتبر بود → کپی کامل نود
     if is_valid_node_id(text, db):
@@ -3134,7 +3719,7 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "parent": new_parent,
                 "children": [],
                 "contents": old.get("contents", []).copy(),
-                "style": old.get("style")  # <--- این خط را اضافه کن
+                "style": old.get("style")
             }
             
             for child in old.get("children", []):
@@ -3143,10 +3728,32 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return new_id
 
-        push_admin_history(context, db)  # 👈 اینجا
+        push_admin_history(context, db)
         new_root_id = clone_node(source_id, current_node_id)
         db[current_node_id]["children"].append(new_root_id)
-        save_db(db)
+        
+        # --- سیستم لاگ‌گیری برای حالت کپی با هش ---
+        parent_name = db[current_node_id]["name"]
+        parent_link = get_link(current_node_id, parent_name, bot_username)
+        
+        copied_node_name = db[new_root_id]["name"]
+        copied_node_link = get_link(new_root_id, copied_node_name, bot_username)
+        
+        desc = f"📋 پوشه {copied_node_link} (کپی‌شده از روی هش) به {parent_link} اضافه شد."
+        caption = format_admin_log(update.effective_user, desc)
+        set_pending_caption(context, caption)
+        
+        # ذخیره دیتابیس با اعمال کپشن
+        save_db(db, context=context)
+
+        # افزایش آمار دکمه‌های ادمین
+        userdata = load_userdata()
+        if "sub_admins_buttons" not in userdata:
+            userdata["sub_admins_buttons"] = {}
+        user_id = update.effective_user.id
+        current_count = userdata["sub_admins_buttons"].get(str(user_id), 0)
+        userdata["sub_admins_buttons"][str(user_id)] = current_count + 1
+        save_userdata(userdata)
 
         await update.message.reply_text(
             "✅ دکمه با تمام زیرمجموعه‌ها کپی شد.",
@@ -3163,16 +3770,23 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "contents": []
     }
 
-    push_admin_history(context, db)  # 👈 اینجا
+    push_admin_history(context, db)
     db[current_node_id]["children"].append(new_id)
-    save_db(db)
 
-    #await update.message.reply_text(
-    #    f"دکمه '{text}' ساخته شد.",
-    #    reply_markup=get_keyboard(current_node_id, True)
-    #)
+    # --- سیستم لاگ‌گیری برای دکمه جدید معمولی ---
+    parent_name = db[current_node_id]["name"]
+    parent_link = get_link(current_node_id, parent_name, bot_username)
+    child_name = text
+    child_link = get_link(new_id, child_name, bot_username)
+    
+    desc = f"➕ پوشه جدید {child_link} به {parent_link} اضافه شد."
+    caption = format_admin_log(update.effective_user, desc)
+    set_pending_caption(context, caption)
 
-    # تعداد دکمه اضافه شده هر ادمین
+    # ذخیره دیتابیس با اعمال کپشن
+    save_db(db, context=context)
+
+    # افزایش آمار دکمه‌های ادمین
     userdata = load_userdata()
     if "sub_admins_buttons" not in userdata:
         userdata["sub_admins_buttons"] = {}
@@ -3189,63 +3803,199 @@ async def add_button_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CHOOSING
 
 
+def extract_message_content(msg):
+    raw_text = msg.text
+    raw_caption = msg.caption
+
+    msg_entities = [e.to_dict() for e in msg.entities] if msg.entities else None
+    msg_caption_entities = [e.to_dict() for e in msg.caption_entities] if msg.caption_entities else None
+
+    if msg.photo:
+        return {
+            "type": "photo",
+            "file_id": msg.photo[-1].file_id,
+            "caption": raw_caption,
+            "entities": msg_caption_entities,
+        }
+
+    if msg.video:
+        return {
+            "type": "video",
+            "file_id": msg.video.file_id,
+            "caption": raw_caption,
+            "entities": msg_caption_entities,
+        }
+
+    if msg.document:
+        return {
+            "type": "document",
+            "file_id": msg.document.file_id,
+            "caption": raw_caption,
+            "entities": msg_caption_entities,
+        }
+
+    if msg.audio:
+        return {
+            "type": "audio",
+            "file_id": msg.audio.file_id,
+            "caption": raw_caption,
+            "entities": msg_caption_entities,
+        }
+
+    if msg.voice:
+        return {
+            "type": "voice",
+            "file_id": msg.voice.file_id,
+            "caption": raw_caption,
+            "entities": msg_caption_entities,
+        }
+
+    if msg.text and not msg.text.startswith('/'):
+        return {
+            "type": "text",
+            "text": raw_text,
+            "entities": msg_entities,
+        }
+
+    return None
+
+
 async def receive_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = msg.text
-    
+
+    temp_content = context.user_data.get("temp_content")
+    if temp_content is None:
+        current = context.user_data.get("current_node", "root")
+        await msg.reply_text(
+            "ابتدا از طریق دکمه '➕ افزودن محتوا' وارد حالت افزودن محتوا شوید.",
+            reply_markup=get_keyboard(current, True),
+        )
+        return CHOOSING
+
     if text == "❌ لغو":
-        current = context.user_data.get('current_node', 'root')
-        await update.message.reply_text("عملیات لغو شد.", reply_markup=get_keyboard(current, True))
+        current = context.user_data.get("current_node", "root")
+        context.user_data.pop("temp_content", None)
+        context.user_data.pop("change_target", None) # پاکسازی حالت جایگزینی
+        await msg.reply_text("عملیات لغو شد.", reply_markup=get_keyboard(current, True))
         return CHOOSING
 
     if text == "✅ ثبت نهایی":
-        # ذخیره محتوا در دیتابیس
-        temp_content = context.user_data.get('temp_content', [])
-        if temp_content:
-            current_node_id = context.user_data.get('current_node', 'root')
-            db = load_db()
-            push_admin_history(context, db)
+        if not temp_content:
+            current = context.user_data.get("current_node", "root")
+            context.user_data.pop("temp_content", None)
+            context.user_data.pop("change_target", None)
+            await msg.reply_text("چیزی برای ذخیره وجود نداشت.", reply_markup=get_keyboard(current, True))
+            return CHOOSING
 
-            if "contents" not in db[current_node_id]:
-                db[current_node_id]["contents"] = []
+        current_node_id = context.user_data.get("current_node", "root")
+        db = load_db()
+        push_admin_history(context, db)
+
+        if "contents" not in db[current_node_id]:
+            db[current_node_id]["contents"] = []
+
+        final_contents = []
+        for item in temp_content:
+            saved_item = {k: v for k, v in item.items() if k != "message_id"}
+            final_contents.append(saved_item)
+
+        # 🔄 بررسی اینکه آیا در حالت جایگزینی (Change) هستیم یا خیر
+        change_target = context.user_data.get("change_target")
+        if change_target:
+            target_node = change_target["node_id"]
+            idx = change_target["content_index"]
             
-            db[current_node_id]["contents"].extend(temp_content)
-            save_db(db)
-            await update.message.reply_text(f"{len(temp_content)} مورد ذخیره شد.", reply_markup=get_keyboard(current_node_id, True))
+            if target_node == current_node_id and len(db[target_node]["contents"]) > idx:
+                # حذف فایل قدیمی و درج فایل‌های جدید به جای آن
+                db[target_node]["contents"].pop(idx)
+                for item in reversed(final_contents):
+                    db[target_node]["contents"].insert(idx, item)
+                
+                msg_text = f"🔄 فایل قدیمی حذف و {len(final_contents)} فایل جدید جایگزین شد."
+            else:
+                db[current_node_id]["contents"].extend(final_contents)
+                msg_text = f"⚠️ خطا در تطابق مسیر! فایل‌ها به عنوان محتوای جدید به انتهای پوشه اضافه شدند."
+            
+            context.user_data.pop("change_target", None)
         else:
-            current = context.user_data.get('current_node', 'root')
-            await update.message.reply_text("موردی برای ذخیره وجود نداشت.", reply_markup=get_keyboard(current, True))
-        
+            # رفتار عادی افزودن محتوا
+            db[current_node_id]["contents"].extend(final_contents)
+            msg_text = f"{len(final_contents)} مورد ذخیره شد."
+
+        # ریست کردن حافظه موقت نگاشت به دلیل جابجا شدن ایندکس‌ها
+        context.user_data.pop("sent_mapping", None)
+
+        bot_username = context.bot.username
+        node_name = db[current_node_id]["name"]
+        node_link = get_link(current_node_id, node_name, bot_username)
+        desc = f"📝 تغییرات محتوا در پوشه {node_link} اعمال شد."
+        caption = format_admin_log(update.effective_user, desc)
+        set_pending_caption(context, caption)
+
+        save_db(db, context=context)
+        context.user_data.pop("temp_content", None)
+
+        await msg.reply_text(
+            msg_text,
+            reply_markup=get_keyboard(current_node_id, True),
+        )
         return CHOOSING
 
-    # پردازش فایل دریافتی
-    content_data = None
-    
-    if msg.photo:
-        content_data = {'type': 'photo', 'file_id': msg.photo[-1].file_id, 'caption': msg.caption_html or msg.caption, "format": "HTML"}
-    elif msg.video:
-        content_data = {'type': 'video', 'file_id': msg.video.file_id, 'caption': msg.caption_html or msg.caption, "format": "HTML"}
-    elif msg.document:
-        content_data = {'type': 'document', 'file_id': msg.document.file_id, 'caption': msg.caption_html or msg.caption, "format": "HTML"}
-    elif msg.audio:
-        content_data = {'type': 'audio', 'file_id': msg.audio.file_id, 'caption': msg.caption_html or msg.caption, "format": "HTML"}
-    elif msg.voice:
-        content_data = {'type': 'voice', 'file_id': msg.voice.file_id, 'caption': msg.caption_html or msg.caption, "format": "HTML"}
-    elif msg.text and not msg.text.startswith('/'):
-        content_data = {'type': 'text', 'text': msg.text_html, "format": "HTML"}
+    if text == "حذف" and msg.reply_to_message:
+        del_id = msg.reply_to_message.message_id
+        before = len(temp_content)
+        temp_content[:] = [item for item in temp_content if item.get("message_id") != del_id]
 
-    if content_data:
-        context.user_data['temp_content'].append(content_data)
-        # یک ری اکشن یا پیام کوتاه برای اطمینان کاربر
+        if len(temp_content) != before:
+            await msg.reply_text("محتوا از لیست موقت حذف شد.")
+        else:
+            await msg.reply_text("این پیام در لیست موقت پیدا نشد.")
+
+        return WAITING_CONTENT
+
+    content = extract_message_content(msg)
+    if content:
+        content["message_id"] = msg.message_id
+        temp_content.append(content)
+
         try:
-            await update.message.set_reaction("👍") # فقط در نسخه های جدید تلگرام کار میکنه
-        except:
+            await msg.set_reaction("👍")
+        except Exception:
             pass
-    
+
     return WAITING_CONTENT
 
-async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    edited = update.edited_message
+    if not edited:
+        return
 
+    temp_content = context.user_data.get("temp_content")
+    if not temp_content:
+        return
+
+    for index, item in enumerate(temp_content):
+        if item.get("message_id") != edited.message_id:
+            continue
+
+        new_content = extract_message_content(edited)
+
+        if new_content is None:
+            temp_content.pop(index)
+        else:
+            new_content["message_id"] = edited.message_id
+            temp_content[index] = new_content
+
+        try:
+            await edited.set_reaction("✏️")
+        except Exception:
+            pass
+
+        break
+
+
+async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # لغو
     if update.message.text == "❌ لغو":
         current = context.user_data.get('current_node', 'root')
@@ -3265,6 +4015,11 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     byte_array = await file.download_as_bytearray()
 
     try:
+        # ۱. آماده‌سازی کپشن لاگ‌گیری در ابتدا
+        desc = "📥 بکاپ جدید (ریستور دیتابیس) وارد شد."
+        caption = format_admin_log(update.effective_user, desc)
+        set_pending_caption(context, caption) # ذخیره در کانتکست جهت همگام‌سازی
+
         # ============================
         # CASE 1: فایل JSON مستقیم
         # ============================
@@ -3272,8 +4027,10 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(DB_FILE, "wb") as f:
                 f.write(byte_array)
 
-            upload_db_to_telegram()
+            # آپلود بکاپ در تلگرام با کپشن گزارش تغییرات ادمین
+            upload_db_to_telegram(caption=caption)
 
+            # پاکسازی تاریخچه و ریستارت نود به root
             context.user_data.pop("admin_history", None)
             context.user_data.pop("admin_future", None)
             context.user_data["current_node"] = "root"
@@ -3288,7 +4045,6 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # CASE 2: فایل ZIP شامل database.json
         # ============================
         if filename.endswith(".zip"):
-
             with zipfile.ZipFile(iolib.BytesIO(byte_array)) as zf:
                 db_name = None
                 for name in zf.namelist():
@@ -3303,12 +4059,14 @@ async def restore_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(DB_FILE, "wb") as f:
                     f.write(zf.read(db_name))
 
-            upload_db_to_telegram()
+            # آپلود بکاپ در تلگرام با کپشن گزارش تغییرات ادمین
+            upload_db_to_telegram(caption=caption)
 
+            # پاکسازی تاریخچه و ریستارت نود به root
             context.user_data.pop("admin_history", None)
             context.user_data.pop("admin_future", None)
             context.user_data["current_node"] = "root"
-
+            
             await update.message.reply_text(
                 "✅ بکاپ ZIP با موفقیت وارد شد.",
                 reply_markup=get_keyboard("root", True)
@@ -3337,80 +4095,103 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     return CHOOSING
-
-
-# ======== BUILD APPLICATION ========  ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ======== ======== BUILD APPLICATION ========
 def build_application():
-
-    # ساخت اپلیکیشن ربات
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # دستورات رنگی ادمین
+    # هندلرهای واقعاً سراسری و تک‌مرحله‌ای
     application.add_handler(CommandHandler("green", set_node_style), group=0)
     application.add_handler(CommandHandler("blue", set_node_style), group=0)
     application.add_handler(CommandHandler("red", set_node_style), group=0)
     application.add_handler(CommandHandler("none", set_node_style), group=0)
+    application.add_handler(CommandHandler("on_of_search", toggle_smart_search), group=0)
 
-    # 🔔 پیام‌های بدون /start → not_started
+    # اگر خواستی not_started موقتاً برای دیباگ کلاً حذفش کن
     application.add_handler(
-        MessageHandler(
-            filters.TEXT & (~filters.COMMAND),
-            not_started
-        ),
+        MessageHandler(filters.TEXT & (~filters.COMMAND), not_started),
         group=0
     )
 
-    application.add_handler(CommandHandler("on_of_search", toggle_smart_search), group=0)
+    # ادیت پیام
+    application.add_handler(
+        MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit),
+        group=2
+    )
 
-    # ConversationHandler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler("start", start)],
         states={
             CHOOSING: [
                 CommandHandler("report", report_page),
                 CommandHandler("deeplink", deeplink_command),
                 CommandHandler("chat", start_chat_with_admin),
+
+                # اینا باید داخل کانورسیشن باشند
+                CommandHandler("change", handle_reply_change),
+                CommandHandler("del", handle_reply_delete),
+
                 CallbackQueryHandler(inline_handler, pattern="^reply_to_admin$"),
                 CallbackQueryHandler(inline_handler, pattern="^admin_"),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), handle_navigation)
+
+                MessageHandler(filters.TEXT & (~filters.COMMAND), handle_navigation),
             ],
+
             WAITING_BUTTON_NAME: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), add_button_name)
             ],
+
             WAITING_CONTENT: [
+                # اگر خواستی در این state هم /del یا /change قابل استفاده باشد:
+                CommandHandler("change", handle_reply_change),
+                CommandHandler("del", handle_reply_delete),
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_content)
             ],
+
             WAITING_RESTORE_FILE: [
                 MessageHandler(filters.Document.ALL, restore_backup),
                 MessageHandler(filters.TEXT, restore_backup)
             ],
+
             WAITING_RENAME_BUTTON: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), rename_button)
             ],
+
+            WAITING_REPORT_TEXT: [
+                CommandHandler("no_messager", report_without_message),
+                CommandHandler("cansel", cancel_report),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_report_text),
+            ],
+            
             WAITING_ADMIN_PASSWORD_EDIT: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), set_admin_password)
             ],
+
             WAITING_USERDATA_UPLOAD: [
                 MessageHandler(filters.Document.ALL, restore_userdata),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), restore_userdata)  # برای لغو یا متن اشتباه
+                MessageHandler(filters.TEXT & (~filters.COMMAND), restore_userdata)
             ],
+
             WAITING_ADD_ADMIN: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), add_sub_admin)
             ],
+
             WAITING_REMOVE_ADMIN: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), remove_sub_admin)
             ],
+
             WAITING_BAN_USER: [
                 CallbackQueryHandler(inline_handler, pattern="^admin_"),
                 MessageHandler(filters.TEXT & (~filters.COMMAND), receive_ban_user_id)
             ],
+
             WAITING_UNBAN_USER: [
                 CallbackQueryHandler(inline_handler, pattern="^admin_"),
                 MessageHandler(filters.TEXT & (~filters.COMMAND), receive_unban_user_id)
             ],
+
             WAITING_BROADCAST_CONTENT: [
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_broadcast_content)
             ],
+
             WAITING_PICK_USER_FOR_MSG: [
                 CallbackQueryHandler(inline_handler, pattern="^admin_msg_pick_page_"),
                 CallbackQueryHandler(handle_user_id_input, pattern="^admin_send_msg_to_"),
@@ -3418,15 +4199,23 @@ def build_application():
                 CallbackQueryHandler(inline_handler, pattern="^admin_users$"),
                 MessageHandler(filters.TEXT & (~filters.COMMAND), handle_user_id_input),
             ],
+
             WAITING_SINGLE_USER_CONTENT: [
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_broadcast_content)
             ],
+
             WAITING_CHAT_MESSAGE: [
                 CommandHandler("cancel", cancel),
                 MessageHandler(filters.ALL & (~filters.COMMAND), receive_chat_message),
             ]
         },
-        fallbacks=[CommandHandler('start', start)]
+        fallbacks=[
+            CommandHandler("start", start),
+            CommandHandler("change", handle_reply_change),
+            CommandHandler("del", handle_reply_delete),
+            CommandHandler("cansel", cancel_report),
+        ],
+        allow_reentry=True,
     )
 
     application.add_handler(conv_handler, group=1)
