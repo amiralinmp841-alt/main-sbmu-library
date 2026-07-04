@@ -1735,7 +1735,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         """🕊 به ربات کتابخانه دانشگاه خوش آمدید.
-    
     <blockquote>
     🔍 <b>جستجوی فایل‌ها</b>
     برای پیدا کردن فایل موردنظر، کافی است نام یا توضیح آن را به‌صورت متنی ارسال کنید؛ برای مثال:
