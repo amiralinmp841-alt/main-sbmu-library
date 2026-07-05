@@ -875,6 +875,59 @@ def set_report_page(context: ContextTypes.DEFAULT_TYPE, node_id: str):
     """
     context.user_data["current_report_node"] = node_id
 
+def set_pending_report(context: ContextTypes.DEFAULT_TYPE, report_data: dict):
+    context.user_data["pending_report"] = report_data
+
+
+def get_pending_report(context: ContextTypes.DEFAULT_TYPE):
+    return context.user_data.get("pending_report")
+
+
+def clear_pending_report(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("pending_report", None)
+
+
+async def send_pending_report(update: Update, context: ContextTypes.DEFAULT_TYPE, report_message_text: str | None = None):
+    pending = get_pending_report(context)
+
+    if not pending:
+        await update.message.reply_text("❌ گزارشی برای ارسال پیدا نشد.")
+        return CHOOSING
+
+    user = update.effective_user
+    report_message_text = (report_message_text or "").strip()
+
+    report_text = pending["report_text"]
+    user_reply = pending["user_reply"]
+
+    if report_message_text:
+        escaped_report_message = html.escape(report_message_text)
+
+        report_text += (
+            f"\n\n📝 <b>متن گزارش:</b>\n{escaped_report_message}"
+        )
+
+        user_reply += (
+            f"\n\n📝 <b>متن گزارش:</b>\n{escaped_report_message}"
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=REPORT_GROUP_ID,
+            text=report_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+        await update.message.reply_text(user_reply, parse_mode="HTML")
+    except Exception as e:
+        print("Failed to send report:", e)
+        await update.message.reply_text("❌ ارسال گزارش با خطا مواجه شد.")
+    finally:
+        clear_pending_report(context)
+
+    return CHOOSING
+
 
 async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_user_activity(update, count_message=False)
@@ -1732,8 +1785,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_report_page(context, "root")
     
     await update.message.reply_text(
-        """🕊 به ربات کتابخانه دانشگاه خوش آمدید.
-    <blockquote>
+        """🕊 به ربات کتابخانه دانشگاه خوش آمدید.<blockquote>
     🔍 <b>جستجوی فایل‌ها</b>
     برای پیدا کردن فایل موردنظر، کافی است نام یا توضیح آن را به‌صورت متنی ارسال کنید؛ برای مثال:
     • وویس جلسه اول باکتری‌شناسی بهمن ۴۰۳
@@ -1756,7 +1808,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     👨‍💻 <b>ارتباط با مدیر</b>
     پیشنهادها، انتقادات و گزارش‌های خود را از طریق دستور /chat با ما در میان بگذارید.
     
-    📌 نسخه: V_4.6.16
+    📌 نسخه: V_4.6.17
     </blockquote>""",
         reply_markup=get_keyboard("root", is_admin),
         parse_mode="HTML"
