@@ -778,136 +778,175 @@ def clear_all_favorites(user_id):
         save_userdata(userdata, upload=True) # ذخیره و آپلود نهایی
 
 
-async def send_favorite_folder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    user_id = update.effective_user.id
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        print("REACTION UPDATE:", update.to_dict())
+    except:
+        pass
 
-    userdata = load_userdata()
+    reaction = update.message_reaction
+    if not reaction:
+        print("NO message_reaction")
+        return
+
+    user_id = reaction.user.id if reaction.user else None
+    chat_id = reaction.chat.id
+    msg_id = reaction.message_id
+
+    if not user_id:
+        print("NO user_id")
+        return
+
+    print("REACTION FROM:", user_id, "ON MSG:", msg_id)
+
+    # دقیقاً مثل deeplink
+    sent_mapping = context.user_data.get("sent_mapping", {})
+    target = sent_mapping.get(msg_id)
+
+    print("META:", target)
+
+    if not target:
+        print("NO META FOUND IN sent_mapping")
+        return
+
+    node_id = target.get("node_id")
+    content_index = target.get("content_index")
+
+    if node_id is None or content_index is None:
+        print("Meta incomplete.")
+        return
+
     db = load_db()
 
-    favorites = (
-        userdata
-        .get("users", {})
-        .get(str(user_id), {})
-        .get("favorites", [])
-    )
+    if node_id not in db or "contents" not in db[node_id]:
+        print("Node/content not found in db")
+        return
 
-    if not favorites:
-        await message.reply_text("📁 پوشه دلخواه خالی است.")
-        return CHOOSING
+    contents = db[node_id].get("contents", [])
 
-    # بازیابی آیتم‌های واقعی دیتابیس
-    resolved = []
-    for fav in favorites:
-        node_id = fav.get("node_id")
-        content_index = fav.get("content_index")
+    try:
+        idx = int(content_index)
+    except (TypeError, ValueError):
+        print("Invalid content_index:", content_index)
+        return
 
-        if node_id not in db:
-            continue
+    if not (0 <= idx < len(contents)):
+        print("content index out of range")
+        return
 
-        contents = db[node_id].get("contents", [])
-        if (
-            isinstance(content_index, int) and
-            0 <= content_index < len(contents)
-        ):
-            resolved.append({
-                "node_id": node_id,
-                "content_index": content_index,
-                "item": contents[content_index]
-            })
+    target_item = contents[idx]
+    msg_type = target_item.get("type", "text")
+    media_group_id = target_item.get("media_group_id")
+    groupable_types = {"photo", "video", "document", "audio"}
 
-    if not resolved:
-        await message.reply_text("📁 پوشه دلخواه خالی است یا فایل‌ها دیگر موجود نیستند.")
-        return CHOOSING
+    matched_items = []
 
-    # mapping لازم برای واکنش‌ها
-    sent_mapping = context.user_data.setdefault("sent_mapping", {})
+    # دقیقاً مثل deeplink: اگر عضو گروه فایل بود، همه اعضای گروه را پیدا کن
+    if media_group_id and msg_type in groupable_types:
+        start = idx
+        while start > 0:
+            prev_item = contents[start - 1]
+            if (
+                prev_item.get("media_group_id") == media_group_id
+                and prev_item.get("type") in groupable_types
+            ):
+                start -= 1
+            else:
+                break
 
-    groupable = {"photo", "video", "document", "audio"}
+        end = idx
+        while end + 1 < len(contents):
+            next_item = contents[end + 1]
+            if (
+                next_item.get("media_group_id") == media_group_id
+                and next_item.get("type") in groupable_types
+            ):
+                end += 1
+            else:
+                break
 
-    i = 0
-    while i < len(resolved):
-        entry = resolved[i]
-        item = entry["item"]
+        for i in range(start, end + 1):
+            matched_items.append((i, contents[i]))
+    else:
+        matched_items.append((idx, target_item))
 
-        msg_type = item.get("type")
-        media_group_id = item.get("media_group_id")
+    new_emojis = [r.emoji for r in reaction.new_reaction]
+    old_emojis = [r.emoji for r in reaction.old_reaction]
 
-        # اگر عضو گروه فایل بود → گروه را جمع کن
-        if media_group_id and msg_type in groupable:
-            group = []
-            j = i
+    HEARTS = {"❤", "❤️"}
+    DISLIKES = {"👎"}
 
-            while j < len(resolved):
-                n = resolved[j]["item"]
-                if (
-                    n.get("media_group_id") == media_group_id and
-                    n.get("type") in groupable
-                ):
-                    group.append(resolved[j])
-                    j += 1
-                else:
-                    break
+    added_heart = any(e in HEARTS for e in new_emojis) and not any(e in HEARTS for e in old_emojis)
+    removed_heart = any(e in HEARTS for e in old_emojis) and not any(e in HEARTS for e in new_emojis)
+    added_dislike = any(e in DISLIKES for e in new_emojis) and not any(e in DISLIKES for e in old_emojis)
 
-            # اگر گروه حداقل ۲ عضو دارد → آلبوم بساز
-            if len(group) > 1:
-                media_objs = []
-                group_caption = None
-                group_entities = None
+    affected_count = 0
 
-                # کپشن اولین مورد دارای کپشن
-                for g in group:
-                    cap = g["item"].get("caption")
-                    if cap:
-                        group_caption = cap
-                        group_entities = g["item"].get("entities")
-                        break
-
-                for idx2, g in enumerate(group):
-                    im = build_input_media(
-                        g["item"],
-                        is_first=(idx2 == 0),
-                        forced_caption=group_caption if idx2 == 0 else None,
-                        forced_entities=group_entities if idx2 == 0 else None,
-                    )
-                    media_objs.append(im)
-
-                # ارسال آلبوم
-                sent = await message.reply_media_group(media=media_objs)
-
-                for sent_msg, g in zip(sent, group):
-                    sent_mapping[sent_msg.message_id] = {
-                        "node_id": g["node_id"],
-                        "content_index": g["content_index"],
-                    }
-
-                i = j
+    if added_heart:
+        for item_index, item in matched_items:
+            item_type = item.get("type", "text")
+            if item_type == "text":
                 continue
 
-            # اگر گروه تک‌عضوی بود → تکی بفرست
-            for g in group:
-                sm = await send_single_content(message, g["item"])
-                if sm:
-                    sent_mapping[sm.message_id] = {
-                        "node_id": g["node_id"],
-                        "content_index": g["content_index"],
-                    }
+            if add_to_favorites(user_id, node_id, item_index):
+                affected_count += 1
 
-            i = j
-            continue
+        if affected_count > 0:
+            if len(matched_items) == 1:
+                text = "✅ به پوشه دلخواه اضافه شد."
+            else:
+                text = f"✅ {affected_count} فایل از این گروه به پوشه دلخواه اضافه شد."
 
-        # آیتم‌های غیر گروهی
-        sm = await send_single_content(message, item)
-        if sm:
-            sent_mapping[sm.message_id] = {
-                "node_id": entry["node_id"],
-                "content_index": entry["content_index"],
-            }
+            await context.bot.send_message(
+                chat_id=chat_id,
+                reply_to_message_id=msg_id,
+                text=text
+            )
+        return
 
-        i += 1
+    if removed_heart:
+        for item_index, item in matched_items:
+            item_type = item.get("type", "text")
+            if item_type == "text":
+                continue
 
-    return CHOOSING
+            if remove_from_favorites(user_id, node_id, item_index):
+                affected_count += 1
 
+        if affected_count > 0:
+            if len(matched_items) == 1:
+                text = "🗑 از پوشه دلخواه حذف شد."
+            else:
+                text = f"🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد."
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                reply_to_message_id=msg_id,
+                text=text
+            )
+        return
+
+    if added_dislike:
+        for item_index, item in matched_items:
+            item_type = item.get("type", "text")
+            if item_type == "text":
+                continue
+
+            if remove_from_favorites(user_id, node_id, item_index):
+                affected_count += 1
+
+        if affected_count > 0:
+            if len(matched_items) == 1:
+                text = "🗑 حذف شد."
+            else:
+                text = f"🗑 {affected_count} فایل از این گروه حذف شد."
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                reply_to_message_id=msg_id,
+                text=text
+            )
+        return
 
 
 async def clear_favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4182,14 +4221,115 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!"
             )
     
+            # ========= ارسال پوشه دلخواه با پشتیبانی کامل آلبوم =========
             db = load_db()
+            
+            # ساخت لیست موارد واقعی دیتابیس
+            resolved = []
             for fav in favorites:
-                node = db.get(fav["node_id"])
-                if node and "contents" in node and len(node["contents"]) > fav["content_index"]:
-                    item = node["contents"][fav["content_index"]]
-                    sent = await send_single_content(update.message, item)
-                    if sent:
-                        context.user_data.setdefault("sent_mapping", {})[sent.message_id] = fav
+                node_id = fav["node_id"]
+                idx = fav["content_index"]
+            
+                node = db.get(node_id)
+                if not node:
+                    continue
+            
+                contents = node.get("contents", [])
+                if 0 <= idx < len(contents):
+                    resolved.append({
+                        "node_id": node_id,
+                        "content_index": idx,
+                        "item": contents[idx]
+                    })
+            
+            
+            # مپ واکنش‌ها
+            sent_mapping = context.user_data.setdefault("sent_mapping", {})
+            
+            # انواع قابل گروه‌بندی
+            groupable = {"photo", "video", "document", "audio"}
+            
+            i = 0
+            while i < len(resolved):
+                entry = resolved[i]
+                item = entry["item"]
+            
+                msg_type = item.get("type")
+                mgid = item.get("media_group_id")
+            
+                # اگر عضو media_group است → گروه کامل را پیدا کن
+                if mgid and msg_type in groupable:
+                    group_entries = []
+                    j = i
+            
+                    # جمع کردن اعضای پشت‌سر‌هم مربوط به همین گروه
+                    while j < len(resolved):
+                        x = resolved[j]["item"]
+                        if (
+                            x.get("media_group_id") == mgid
+                            and x.get("type") in groupable
+                        ):
+                            group_entries.append(resolved[j])
+                            j += 1
+                        else:
+                            break
+            
+                    # اگر واقعا چند آیتم است → آلبوم بفرست
+                    if len(group_entries) > 1:
+                        media_objs = []
+            
+                        # اولین کپشن معتبر
+                        first_caption = None
+                        first_entities = None
+                        for g in group_entries:
+                            cap = g["item"].get("caption")
+                            if cap:
+                                first_caption = cap
+                                first_entities = g["item"].get("entities")
+                                break
+            
+                        for idx2, g in enumerate(group_entries):
+                            media_objs.append(
+                                build_input_media(
+                                    g["item"],
+                                    is_first=(idx2 == 0),
+                                    forced_caption=first_caption if idx2 == 0 else None,
+                                    forced_entities=first_entities if idx2 == 0 else None,
+                                )
+                            )
+            
+                        sent = await update.message.reply_media_group(media_objs)
+            
+                        for sent_msg, g in zip(sent, group_entries):
+                            sent_mapping[sent_msg.message_id] = {
+                                "node_id": g["node_id"],
+                                "content_index": g["content_index"],
+                            }
+            
+                        i = j
+                        continue
+            
+                    # اگر تک‌عضوی بود → ارسال تکی
+                    sm = await send_single_content(update.message, item)
+                    if sm:
+                        sent_mapping[sm.message_id] = {
+                            "node_id": entry["node_id"],
+                            "content_index": entry["content_index"],
+                        }
+            
+                    i += 1
+                    continue
+            
+                # موارد غیرگروهی
+                sm = await send_single_content(update.message, item)
+                if sm:
+                    sent_mapping[sm.message_id] = {
+                        "node_id": entry["node_id"],
+                        "content_index": entry["content_index"],
+                    }
+            
+                i += 1
+            
     
 
         if text.startswith("🔑 "):
