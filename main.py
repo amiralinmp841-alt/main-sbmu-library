@@ -780,7 +780,7 @@ def add_to_favorites(user_id, node_id, content_index):
     # جلوگیری از تکراری بودن
     if item not in favorites:
         favorites.append(item)
-        save_userdata(userdata, upload=False)
+        save_userdata(userdata, upload=True)
         return True
     return False
 
@@ -793,7 +793,7 @@ def remove_from_favorites(user_id, node_id, content_index):
     item = {"node_id": node_id, "content_index": content_index}
     if item in favorites:
         favorites.remove(item)
-        save_userdata(userdata, upload=Treu)
+        save_userdata(userdata, upload=True)
         return True
     return False
 
@@ -4112,8 +4112,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = context.user_data.get("current_node", "root")
         await update.message.reply_text(
             "📁 پوشه دلخواه\n"
-            "جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n"
-            "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!"
+            "<blockquote>جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n/blockquote>"
+            "<blockquote>جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!\n/blockquote>"
             "<blockquote>⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
             parse_mode="HTML",
             reply_markup=get_keyboard(current, is_admin, user_id=user_id)
