@@ -915,7 +915,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑 از پوشه دلخواه حذف شد."
+                text = "🗑این آیتم، از پوشه دلخواه حذف شد."
             else:
                 text = f"🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد."
 
@@ -937,7 +937,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑 حذف شد."
+                text = "🗑این آیتم، از پوشه دلخواه حذف شد."
             else:
                 text = f"🗑 {affected_count} فایل از این گروه حذف شد."
 
