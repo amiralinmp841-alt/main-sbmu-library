@@ -948,18 +948,33 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
         if added_count > 0 and already_exists == 0:
             if len(matched_items) == 1:
-                text = "<blockquote>✅ این آیتم به پوشه دلخواه اضافه شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = (
+                    "<blockquote expandable>✅ این آیتم به پوشه دلخواه اضافه شد.\n\n"
+                    "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                    "</blockquote>"
+                )
             else:
-                text = f"<blockquote>✅ {added_count} فایل از این گروه به پوشه دلخواه اضافه شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = (
+                    f"<blockquote expandable>✅ {added_count} فایل از این گروه به پوشه دلخواه اضافه شد.\n\n"
+                    "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                    "</blockquote>")
     
         elif added_count == 0 and already_exists > 0:
             if len(matched_items) == 1:
-                text = "<blockquote>ℹ️ این فایل از قبل به پوشه دلخواه اضافه شده است.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = "<blockquote expandable>ℹ️ این فایل از قبل به پوشه دلخواه اضافه شده است.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
             else:
-                text = "<blockquote>ℹ️ همه این فایل‌ها از قبل در پوشه دلخواه بودند.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = (
+                    "<blockquote expandable>ℹ️ همه این فایل‌ها از قبل در پوشه دلخواه بودند.\n\n"
+                    "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                    "</blockquote>"
+                )
     
         else:
-            text = f"<blockquote>⚠️ {added_count} اضافه شد، {already_exists} مورد از قبل وجود داشت.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+            text = (
+                f"<blockquote expandable>⚠️ {added_count} اضافه شد، {already_exists} مورد از قبل وجود داشت.\n\n"
+                "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                "</blockquote>"
+            )
     
         await context.bot.send_message(
             chat_id=chat_id,
@@ -983,9 +998,17 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "<blockquote>🗑 این آیتم از پوشه دلخواه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = ("<blockquote expandable>🗑 این آیتم از پوشه دلخواه حذف شد.\n\n"
+                "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                "</blockquote>"
+                )
             else:
-                text = f"<blockquote>🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = (
+                f"<blockquote expandable>🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد.\n\n"
+                "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                "</blockquote>"
+                )
+            
 
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -1009,9 +1032,17 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑 حذف شد."
+                text = (
+                    "<blockquote expandable>🗑 این آیتم، از پوشه دلخواه، حذف شد.\n\n"
+                    "⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                    "</blockquote>"
+                )
             else:
-                text = f"<blockquote>🗑 {affected_count} فایل از این گروه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
+                text = (
+                    f"<blockquote expandable>🗑 {affected_count} فایل از این گروه حذف شد.\n\n"
+                    "⚙️ جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+                    "</blockquote>"
+                )
 
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -1032,7 +1063,9 @@ async def clear_favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     current=context.user_data.get("current_node", "root")
 
     await update.message.reply_text(
-        "<blockquote>✅ پوشه دلخواه پاکسازی شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
+        "<blockquote expandable>✅ پوشه دلخواه پاکسازی شد.\n\n"
+        "⚙️ جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید"
+        "</blockquote>",
         reply_markup=get_keyboard(current, is_admin, user_id=user_id),
         parse_mode="HTML",
     )
@@ -4112,9 +4145,9 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = context.user_data.get("current_node", "root")
         await update.message.reply_text(
             "📁 پوشه دلخواه\n"
-            "<blockquote>جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n</blockquote>"
-            "<blockquote>جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!\</blockquote>"
-            "<blockquote>⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
+            "<blockquote expandable>جهت حذف هر کدام از فایل‌ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n\n"
+            " جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!\n\n"
+            "⚙️ جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
             parse_mode="HTML",
             reply_markup=get_keyboard(current, is_admin, user_id=user_id)
         )
