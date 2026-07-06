@@ -5624,7 +5624,7 @@ def build_application():
                 CommandHandler("chat", start_chat_with_admin),
                 CommandHandler("file_id", file_id_command), # 👈 اضافه شدن کامند جدید به منو
                 CommandHandler("change", handle_reply_change),
-                CommandHandler("del", handle_reply_delete),
+                #CommandHandler("del", handle_reply_delete),
                 CommandHandler("clear", clear_favorites_cmd),
 
                 CallbackQueryHandler(inline_handler, pattern="^reply_to_admin$"),
@@ -5716,7 +5716,7 @@ def build_application():
         fallbacks=[
             CommandHandler("start", start),
             CommandHandler("change", handle_reply_change),
-            CommandHandler("del", handle_reply_delete),
+            #CommandHandler("del", handle_reply_delete),
             CommandHandler("cansel", cancel_report),
             CommandHandler("clear", clear_favorites_cmd),
         ],
