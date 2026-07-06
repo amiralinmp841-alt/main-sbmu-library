@@ -779,6 +779,8 @@ def clear_all_favorites(user_id):
 
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    
     try:
         print("REACTION UPDATE:", update.to_dict())
     except:
@@ -786,40 +788,52 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reaction = update.message_reaction
     if not reaction:
-        print("NO message_reaction")
+        #print("NO message_reaction")
         return
 
     user_id = reaction.user.id if reaction.user else None
     chat_id = reaction.chat.id
     msg_id = reaction.message_id
 
+    userdata = load_userdata()
+    current=context.user_data.get("current_node", "root")
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
+
+    if is_user_banned(user_id):
+        await update.message.reply_text(
+            "⛔️ شما از ربات بن شدید و امکان استفاده از این بخش را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CHOOSING
+
     if not user_id:
-        print("NO user_id")
+        #print("NO user_id")
         return
 
-    print("REACTION FROM:", user_id, "ON MSG:", msg_id)
+    #print("REACTION FROM:", user_id, "ON MSG:", msg_id)
 
     # دقیقاً مثل deeplink
     sent_mapping = context.user_data.get("sent_mapping", {})
     target = sent_mapping.get(msg_id)
 
-    print("META:", target)
+    #print("META:", target)
 
     if not target:
-        print("NO META FOUND IN sent_mapping")
+        #print("NO META FOUND IN sent_mapping")
         return
 
     node_id = target.get("node_id")
     content_index = target.get("content_index")
 
     if node_id is None or content_index is None:
-        print("Meta incomplete.")
+        #print("Meta incomplete.")
         return
 
     db = load_db()
 
     if node_id not in db or "contents" not in db[node_id]:
-        print("Node/content not found in db")
+        #print("Node/content not found in db")
         return
 
     contents = db[node_id].get("contents", [])
@@ -827,11 +841,11 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         idx = int(content_index)
     except (TypeError, ValueError):
-        print("Invalid content_index:", content_index)
+        #print("Invalid content_index:", content_index)
         return
 
     if not (0 <= idx < len(contents)):
-        print("content index out of range")
+        #print("content index out of range")
         return
 
     target_item = contents[idx]
@@ -883,25 +897,42 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     affected_count = 0
 
     if added_heart:
+        already_exists = 0
+        added_count = 0
+    
         for item_index, item in matched_items:
             item_type = item.get("type", "text")
             if item_type == "text":
                 continue
-
-            if add_to_favorites(user_id, node_id, item_index):
-                affected_count += 1
-
-        if affected_count > 0:
+    
+            result = add_to_favorites(user_id, node_id, item_index)
+    
+            if result:
+                added_count += 1
+            else:
+                already_exists += 1
+    
+        if added_count > 0 and already_exists == 0:
             if len(matched_items) == 1:
                 text = "✅ به پوشه دلخواه اضافه شد."
             else:
-                text = f"✅ {affected_count} فایل از این گروه به پوشه دلخواه اضافه شد."
-
-            await context.bot.send_message(
-                chat_id=chat_id,
-                reply_to_message_id=msg_id,
-                text=text
-            )
+                text = f"✅ {added_count} فایل از این گروه به پوشه دلخواه اضافه شد."
+    
+        elif added_count == 0 and already_exists > 0:
+            if len(matched_items) == 1:
+                text = "ℹ️ این فایل از قبل به پوشه دلخواه اضافه شده است."
+            else:
+                text = "ℹ️ همه این فایل‌ها از قبل در پوشه دلخواه بودند."
+    
+        else:
+            text = f"⚠️ {added_count} اضافه شد، {already_exists} مورد از قبل وجود داشت."
+    
+        await context.bot.send_message(
+            chat_id=chat_id,
+            reply_to_message_id=msg_id,
+            text=text,
+            reply_markup=get_keyboard(current, is_admin, user_id=user_id)
+        )
         return
 
     if removed_heart:
@@ -915,14 +946,15 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑این آیتم، از پوشه دلخواه حذف شد."
+                text = "🗑 از پوشه دلخواه حذف شد."
             else:
                 text = f"🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد."
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 reply_to_message_id=msg_id,
-                text=text
+                text=text,
+                reply_markup=get_keyboard(current, is_admin, user_id=user_id)
             )
         return
 
@@ -937,28 +969,30 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑این آیتم، از پوشه دلخواه حذف شد."
+                text = "🗑 حذف شد."
             else:
                 text = f"🗑 {affected_count} فایل از این گروه حذف شد."
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 reply_to_message_id=msg_id,
-                text=text
+                text=text,
+                reply_markup=get_keyboard(current, is_admin, user_id=user_id)
             )
         return
 
-
 async def clear_favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     userdata = load_userdata()
-    is_admin = (user_id in ADMIN_IDS) or (user_id in userdata.get("sub_admins", []))
+    sub_admins = userdata.get("sub_admins", [])
+    user_id = update.effective_user.id
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     clear_all_favorites(user_id)
+    current=context.user_data.get("current_node", "root")
 
     await update.message.reply_text(
         "✅ پوشه دلخواه پاکسازی شد.",
-        reply_markup=get_keyboard("root", is_admin, user_id=user_id)
+        reply_markup=get_keyboard(current, is_admin, user_id=user_id)
     )
     return CHOOSING
 
@@ -3896,8 +3930,11 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in ADMIN_IDS and user_id not in userdata.get("sub_admins", []):
             userdata.setdefault("sub_admins", []).append(user_id)
             save_userdata(userdata)
+            current = context.user_data.get("current_node", "root")
     
-            await update.message.reply_text("✅ رمز تایید شد.\nشما اکنون ادمین هستید 😎")
+            await update.message.reply_text("✅ رمز تایید شد.\nشما اکنون ادمین هستید 😎",
+                reply_markup=get_keyboard(current, True, user_id=user_id) 
+                )
     
             # اطلاع به ادمین‌ها
             for aid in ADMIN_IDS:
@@ -3909,6 +3946,11 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🆔 {user_id}\n"
                         f"🔗 @{update.effective_user.username}"
                     )
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text("شما از ادمین‌های اصلی هستید!")
+        if user_id in sub_admins:
+            await update.massage.reply_text("شما قبلا ادمین شده‌اید!")
+
         return CHOOSING
     # --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- 
 
@@ -4029,11 +4071,12 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not favorites:
             await update.message.reply_text("پوشه دلخواه شما خالی است.")
             return CHOOSING
-
+        current = context.user_data.get("current_node", "root")
         await update.message.reply_text(
             "📁 پوشه دلخواه\n"
             "جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n"
-            "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!"
+            "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!",
+            reply_markup=get_keyboard(current, is_admin, user_id=user_id)
         )
 
         # ========= ارسال پوشه دلخواه با پشتیبانی کامل آلبوم =========
@@ -4804,12 +4847,15 @@ async def add_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         context.user_data["admin_panel"] = "admin_mgmt"
+        current=context.user_data.get("current_node", "root")
+        user_id=update.effective_user.id
         
         # 📩 ارسال پیام به ادمین جدید
         try:
             await context.bot.send_message(
                 chat_id=new_admin,
-                text="🎉 شما به عنوان ادمین فرعی ربات منصوب شدید."
+                text="🎉 شما به عنوان ادمین فرعی ربات منصوب شدید.",
+                reply_markup=get_keyboard(current, True, user_id=user_id) 
             )
         except Exception as e:
             print("Failed to notify new admin:", e)
@@ -4872,12 +4918,15 @@ async def remove_sub_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         context.user_data["admin_panel"] = "admin_mgmt"
+        current=context.user_data.get("current_node", "root")
+        user_id=update.effective_user.id
         
         # 📩 ارسال پیام به کاربر حذف‌شده
         try:
             await context.bot.send_message(
                 chat_id=admin_id,
-                text="⚠️ شما از لیست ادمین‌های ربات حذف شدید."
+                text="⚠️ شما از لیست ادمین‌های ربات حذف شدید.",
+                reply_markup=get_keyboard("root", False, user_id=user_id) 
             )
         except Exception as e:
             print("Failed to notify removed admin:", e)
