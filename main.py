@@ -4112,8 +4112,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = context.user_data.get("current_node", "root")
         await update.message.reply_text(
             "📁 پوشه دلخواه\n"
-            "<blockquote>جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n/blockquote>"
-            "<blockquote>جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!\n/blockquote>"
+            "<blockquote>جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n</blockquote>"
+            "<blockquote>جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!\</blockquote>"
             "<blockquote>⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
             parse_mode="HTML",
             reply_markup=get_keyboard(current, is_admin, user_id=user_id)
