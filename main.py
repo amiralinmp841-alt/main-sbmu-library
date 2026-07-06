@@ -4144,7 +4144,8 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
         
             i += 1
-            return CHOOSING
+            
+    return CHOOSING
         
 
     # ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ======= Admin panel handling END ======= ===
