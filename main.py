@@ -476,6 +476,8 @@ def track_user_activity(update: Update, count_message=True):
 
     # اگر از قبل وجود نداشت، پیش‌فرض سرچ هوشمند را روشن نگه دار
     user_record["smart_search_disabled"] = old_data.get("smart_search_disabled", False)
+    # اگر از قبل وجود نداشت، پوشه دلخواه فعال باشد
+    user_record["favorites_disabled"] = old_data.get("favorites_disabled", False)
 
     users[user_id] = user_record
 
@@ -739,7 +741,33 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return CHOOSING
 
+# ========= reactions ===============
+
+
 # ========= favorite folder ===============
+async def on_off_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+    user = users.setdefault(str(user_id), {})
+    current_node = context.user_data.get("current_node", "root")
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
+
+    current = user.get("favorites_disabled", False)
+
+    user["favorites_disabled"] = not current
+
+    save_userdata(userdata, upload=True)
+
+    if user["favorites_disabled"]:
+        text = "🔒 پوشه دلخواه خاموش شد."
+    else:
+        text = "🔓 پوشه دلخواه دوباره فعال شد."
+
+    await update.message.reply_text(text,
+    reply_markup=get_keyboard(current_node, is_admin, user_id=user_id)
+    )
 
 def add_to_favorites(user_id, node_id, content_index):
     userdata = load_userdata()
@@ -765,7 +793,7 @@ def remove_from_favorites(user_id, node_id, content_index):
     item = {"node_id": node_id, "content_index": content_index}
     if item in favorites:
         favorites.remove(item)
-        save_userdata(userdata, upload=False)
+        save_userdata(userdata, upload=Treu)
         return True
     return False
 
@@ -780,7 +808,6 @@ def clear_all_favorites(user_id):
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    
     try:
         print("REACTION UPDATE:", update.to_dict())
     except:
@@ -800,6 +827,10 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub_admins = userdata.get("sub_admins", [])
     is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
+    # پیش‌فرض برای همه True (روشن) است. اگر فیلد favorites_disabled  معادل True باشد یعنی خاموش است.
+    users = userdata.get("users", {})
+    favorites_disabled = users.get(str(user_id), {}).get("favorites_disabled", False)
+    
     if is_user_banned(user_id):
         await update.message.reply_text(
             "⛔️ شما از ربات بن شدید و امکان استفاده از این بخش را ندارید.",
@@ -888,7 +919,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     old_emojis = [r.emoji for r in reaction.old_reaction]
 
     HEARTS = {"❤", "❤️"}
-    DISLIKES = {"👎"}
+    DISLIKES = {"👎", "🖕", "💩"}
 
     added_heart = any(e in HEARTS for e in new_emojis) and not any(e in HEARTS for e in old_emojis)
     removed_heart = any(e in HEARTS for e in old_emojis) and not any(e in HEARTS for e in new_emojis)
@@ -897,6 +928,9 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     affected_count = 0
 
     if added_heart:
+        if favorites_disabled:
+            return
+
         already_exists = 0
         added_count = 0
     
@@ -914,28 +948,31 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
         if added_count > 0 and already_exists == 0:
             if len(matched_items) == 1:
-                text = "✅ به پوشه دلخواه اضافه شد."
+                text = "<blockquote>✅ این آیتم به پوشه دلخواه اضافه شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
             else:
-                text = f"✅ {added_count} فایل از این گروه به پوشه دلخواه اضافه شد."
+                text = f"<blockquote>✅ {added_count} فایل از این گروه به پوشه دلخواه اضافه شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
     
         elif added_count == 0 and already_exists > 0:
             if len(matched_items) == 1:
-                text = "ℹ️ این فایل از قبل به پوشه دلخواه اضافه شده است."
+                text = "<blockquote>ℹ️ این فایل از قبل به پوشه دلخواه اضافه شده است.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
             else:
-                text = "ℹ️ همه این فایل‌ها از قبل در پوشه دلخواه بودند."
+                text = "<blockquote>ℹ️ همه این فایل‌ها از قبل در پوشه دلخواه بودند.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
     
         else:
-            text = f"⚠️ {added_count} اضافه شد، {already_exists} مورد از قبل وجود داشت."
+            text = f"<blockquote>⚠️ {added_count} اضافه شد، {already_exists} مورد از قبل وجود داشت.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
     
         await context.bot.send_message(
             chat_id=chat_id,
             reply_to_message_id=msg_id,
             text=text,
+            parse_mode="HTML",
             reply_markup=get_keyboard(current, is_admin, user_id=user_id)
         )
         return
 
     if removed_heart:
+        if favorites_disabled:
+            return
         for item_index, item in matched_items:
             item_type = item.get("type", "text")
             if item_type == "text":
@@ -946,19 +983,22 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if affected_count > 0:
             if len(matched_items) == 1:
-                text = "🗑 از پوشه دلخواه حذف شد."
+                text = "<blockquote>🗑 این آیتم از پوشه دلخواه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
             else:
-                text = f"🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد."
+                text = f"<blockquote>🗑 {affected_count} فایل از این گروه از پوشه دلخواه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 reply_to_message_id=msg_id,
                 text=text,
+                parse_mode="HTML",
                 reply_markup=get_keyboard(current, is_admin, user_id=user_id)
             )
         return
 
     if added_dislike:
+        if favorites_disabled:
+            return
         for item_index, item in matched_items:
             item_type = item.get("type", "text")
             if item_type == "text":
@@ -971,12 +1011,13 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(matched_items) == 1:
                 text = "🗑 حذف شد."
             else:
-                text = f"🗑 {affected_count} فایل از این گروه حذف شد."
+                text = f"<blockquote>🗑 {affected_count} فایل از این گروه حذف شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>"
 
             await context.bot.send_message(
                 chat_id=chat_id,
                 reply_to_message_id=msg_id,
                 text=text,
+                parse_mode="HTML",
                 reply_markup=get_keyboard(current, is_admin, user_id=user_id)
             )
         return
@@ -991,30 +1032,11 @@ async def clear_favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     current=context.user_data.get("current_node", "root")
 
     await update.message.reply_text(
-        "✅ پوشه دلخواه پاکسازی شد.",
-        reply_markup=get_keyboard(current, is_admin, user_id=user_id)
+        "<blockquote>✅ پوشه دلخواه پاکسازی شد.\n\n ⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
+        reply_markup=get_keyboard(current, is_admin, user_id=user_id),
+        parse_mode="HTML",
     )
     return CHOOSING
-
-#def save_reaction_mapping(chat_id, message_id, node_id, content_index):
-#    userdata = load_userdata()
-#    reaction_map = userdata.setdefault("reaction_map", {})
-#
-#    key = f"{chat_id}:{message_id}"
-#    reaction_map[key] = {
-#        "node_id": node_id,
-#        "content_index": content_index
-#    }
-#
-#    save_userdata(userdata, upload=False)
-#
-#
-#def get_reaction_mapping(chat_id, message_id):
-#    userdata = load_userdata()
-#    reaction_map = userdata.get("reaction_map", {})
-#
-#    key = f"{chat_id}:{message_id}"
-#    return reaction_map.get(key)
 
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
@@ -1053,7 +1075,12 @@ def get_keyboard(node_id, is_admin, user_id=None):
     # ========= favorite folder ===============
     if user_id:
         userdata = load_userdata()
-        favorites = userdata.get("users", {}).get(str(user_id), {}).get("favorites", [])
+        users = userdata.get("users", {})
+        favorites_disabled = users.get(str(user_id), {}).get("favorites_disabled", False)
+        if favorites_disabled:
+            favorites = []
+        else:
+            favorites = userdata.get("users", {}).get(str(user_id), {}).get("favorites", [])
         if favorites:
             favorite_btn = KeyboardButton(
                 text="📁 پوشه دلخواه",
@@ -2484,7 +2511,7 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     results = smart_search(subtree_db, text, limit=5, min_score=45)
 
     help_text = (
-        "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_of_search استفاده کنید."
+        "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_off_search استفاده کنید."
     )
 
     if not results:
@@ -3128,7 +3155,7 @@ async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------------- انتخاب کاربر برای خارج کردن از بن ----------------
     if data.startswith("admin_unban_pick_"):
         target_user_id = int(data.split("_")[-1])
-        ok, message = await unban_user_by_id(target_user_id, context)
+        ok, message = await unban_user_by_id(update, target_user_id, context)
     
         await query.message.reply_text(
             message,
@@ -3654,7 +3681,8 @@ async def ban_user_by_id(target_user_id: int, context: ContextTypes.DEFAULT_TYPE
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
-            text="⛔️ شما از ربات بن شدید و دیگر امکان استفاده از ربات را ندارید."
+            text="⛔️ شما از ربات بن شدید و دیگر امکان استفاده از ربات را ندارید.",
+            reply_markup=ReplyKeyboardRemove()
         )
     except Exception as e:
         print("Failed to notify banned user:", e)
@@ -3721,7 +3749,7 @@ async def receive_unban_user_id(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ فقط آیدی عددی معتبر بفرستید یا روی دکمه‌های اینلاین بزنید.")
         return WAITING_UNBAN_USER
 
-    ok, message = await unban_user_by_id(target_user_id, context)
+    ok, message = await unban_user_by_id(update, target_user_id, context)
 
     await update.message.reply_text(
         message,
@@ -3741,7 +3769,7 @@ async def receive_unban_user_id(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["admin_panel"] = "users"
     return CHOOSING
 
-async def unban_user_by_id(target_user_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def unban_user_by_id(update: Update, target_user_id: int, context: ContextTypes.DEFAULT_TYPE):
     userdata = load_userdata()
     users = userdata.setdefault("users", {})
     target_key = str(target_user_id)
@@ -3755,11 +3783,16 @@ async def unban_user_by_id(target_user_id: int, context: ContextTypes.DEFAULT_TY
     users[target_key]["banned"] = False
     users[target_key]["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_userdata(userdata, upload=True)
+    user_id = update.effective_user.id
+    current = context.user_data.get("current_node", "root")
+    sub_admins = userdata.get("sub_admins", [])
+    is_admin = (user_id in ADMIN_IDS) or (user_id in sub_admins)
 
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
-            text="✅ شما از بن خارج شدید و دوباره می‌توانید از ربات استفاده کنید."
+            text="✅ شما از بن خارج شدید و دوباره می‌توانید از ربات استفاده کنید.",
+            reply_markup=get_keyboard(current, False, user_id=user_id)
         )
     except Exception as e:
         print("Failed to notify unbanned user:", e)
@@ -3949,7 +3982,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in ADMIN_IDS:
             await update.message.reply_text("شما از ادمین‌های اصلی هستید!")
         if user_id in sub_admins:
-            await update.massage.reply_text("شما قبلا ادمین شده‌اید!")
+            await update.message.reply_text("شما قبلا ادمین شده‌اید!")
 
         return CHOOSING
     # --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- --- Check Admin Password --- 
@@ -4066,7 +4099,12 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ========= favorite folder ======================== favorite folder ======================== favorite folder ===============
     if text == "📁 پوشه دلخواه":
         userdata = load_userdata()
+        users = userdata.get("users", {})
         favorites = userdata.get("users", {}).get(str(user_id), {}).get("favorites", [])
+        favorites_disabled = users.get(str(user_id), {}).get("favorites_disabled", False)
+        if favorites_disabled:
+            await update.message.reply_text("❌ شما پوشه دلخواه را غیرفعال کرده‌اید.\n\n⚙️ جهت فعال کردن آن، از دستور /on_off_favorite، استفاده کنید.")
+            return
         
         if not favorites:
             await update.message.reply_text("پوشه دلخواه شما خالی است.")
@@ -4075,7 +4113,9 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📁 پوشه دلخواه\n"
             "جهت حذف هر کدام از فایل ها، همینجا روی آن فایل ری اکت 👎 بزنین.\n"
-            "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!",
+            "جهت حذف همه محتوای صفحه و پنهان شدن آیکون پوشه دلخواه، دستور /clear را بزنید!"
+            "<blockquote>⚙️جهت خاموش کردن پوشه دلخواه، از دستور /on_off_favorite استفاده‌نمایید</blockquote>",
+            parse_mode="HTML",
             reply_markup=get_keyboard(current, is_admin, user_id=user_id)
         )
 
@@ -4602,7 +4642,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ## اگر سرچ خاموش باشد، پاسخی ارسال نمی‌شود یا می‌توانید یک پیام ساده دهید:
         #await update.message.reply_text(
         #    "⚠️ سرچ هوشمند برای شما غیرفعال است.\n"
-        #    "برای فعال کردن مجدد آن از دستور /on_of_search استفاده کنید."
+        #    "برای فعال کردن مجدد آن از دستور /on_off_search استفاده کنید."
         #)
         return CHOOSING
 
@@ -5645,14 +5685,13 @@ def build_application():
     application.add_handler(CommandHandler("red", set_node_style), group=0)
     application.add_handler(CommandHandler("none", set_node_style), group=0)
     application.add_handler(CommandHandler("clear", clear_favorites_cmd), group=0)
-    application.add_handler(CommandHandler("on_of_search", toggle_smart_search), group=0)
+    application.add_handler(CommandHandler("on_off_favorite", on_off_favorite))
+    application.add_handler(CommandHandler("on_off_search", toggle_smart_search), group=0)
+    
     application.add_handler(
-        MessageReactionHandler(
-            handle_reaction,
-            message_reaction_types=MessageReactionHandler.MESSAGE_REACTION
-        ),
+        MessageReactionHandler(handle_reaction, message_reaction_types=MessageReactionHandler.MESSAGE_REACTION), 
         group=0
-    )
+        )
 
     application.add_handler(
         MessageHandler(filters.TEXT & (~filters.COMMAND), not_started),
