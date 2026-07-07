@@ -440,7 +440,7 @@ def track_user_activity(update: Update, count_message=True):
     - آیدی عددی
     - تعداد پیام‌ها / دستورها
     - وضعیت بن
-    - حفظ سایر تنظیمات مثل smart_search_disabled
+    - حفظ سایر تنظیمات مثل smart_search_disabled / favorites_disabled / search_mode
     """
 
     user = update.effective_user
@@ -474,10 +474,12 @@ def track_user_activity(update: Update, count_message=True):
     user_record["first_seen"] = old_data.get("first_seen") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     user_record["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # اگر از قبل وجود نداشت، پیش‌فرض سرچ هوشمند را روشن نگه دار
+    # تنظیمات قابل حفظ
     user_record["smart_search_disabled"] = old_data.get("smart_search_disabled", False)
-    # اگر از قبل وجود نداشت، پوشه دلخواه فعال باشد
     user_record["favorites_disabled"] = old_data.get("favorites_disabled", False)
+
+    # ✅ دیفالت سرچ مود: جنرال
+    user_record["search_mode"] = old_data.get("search_mode", "root")
 
     users[user_id] = user_record
 
@@ -631,26 +633,189 @@ def set_pending_caption(context, caption):
 def pop_pending_caption(context):
     return context.user_data.pop("pending_caption", None)
 
-def set_pending_backup_caption(context, caption):
-    context.user_data["pending_backup_caption"] = caption
+#============ تعیین استایل پوشه ها ==============#
 
-def pop_pending_backup_caption(context):
-    return context.user_data.pop("pending_backup_caption", None)
+#------ تغییر تعداد هر دکمه در یک ردیف ----------
+async def set_custom_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    is_admin = (user_id in ADMIN_IDS) or (user_id in userdata.get("sub_admins", []))
 
-def format_backup_caption(admin_user, action_type):
-    admin_link = get_admin_link(admin_user)
-    username = f"@{admin_user.username}" if admin_user.username else "بدون یوزرنیم"
+    if not is_admin:
+        return
 
-    text = (
-        f"👑 <b>بکاپ دیتابیس</b>\n"
-        f"👤 ادمین: {admin_link}\n"
-        f"🆔: <code>{admin_user.id}</code>\n"
-        f"👤 یوزرنیم: {username}\n"
-        f"⚙️ عملیات: <b>{action_type}</b>"
+    text = update.message.text.strip()
+    lines = text.split("\n")
+
+    current_node_id = context.user_data.get("current_node", "root")
+    db = load_db()
+
+    if current_node_id not in db:
+        await update.message.reply_text("❌ پوشه فعلی در دیتابیس پیدا نشد.")
+        return
+
+    node = db[current_node_id]
+    children_ids = node.get("children", [])
+    
+    if not children_ids:
+        await update.message.reply_text("❌ این پوشه هیچ دکمه‌ای ندارد که چیدمان آن را تغییر دهید.")
+        return
+
+    # 💡 قابلیت جدید: اگر فقط خط اول فرستاده شده بود (/style)، لایوت سفارشی حذف شده و به حالت عادی برمی‌گردد
+    if len(lines) < 2:
+        push_admin_history(context, db)
+        db[current_node_id].pop("layout", None)
+        
+        bot_username = context.bot.username
+        node_name = node["name"]
+        node_link = get_link(current_node_id, node_name, bot_username)
+        
+        desc = f"📐 چیدمان سفارشی پوشه {node_link} حذف شد و به حالت پیش‌فرض ستونی برگشت."
+        log_caption = format_admin_log(update.effective_user, desc)
+        backup_caption = format_backup_caption(update.effective_user, "حذف چیدمان سفارشی دکمه‌ها")
+        
+        set_pending_caption(context, log_caption)
+        set_pending_backup_caption(context, backup_caption)
+        save_db(db, context=context)
+        
+        await update.message.reply_text(
+            "✅ چیدمان سفارشی حذف شد و به حالت استاندارد بازگشت.",
+            reply_markup=get_keyboard(current_node_id, True, user_id=user_id)
+        )
+        return CHOOSING
+
+    # استخراج تمام شماره‌ها از خطوط فرستاده شده
+    layout_by_indices = []
+    used_indices = set()
+    invalid_found = False
+
+    for line in lines[1:]: # از خط دوم به بعد
+        line = line.strip()
+        if not line:
+            continue
+        row_indices = []
+        for num_str in line.split():
+            try:
+                idx = int(num_str) - 1 # تبدیل به index (شروع از 0)
+                if 0 <= idx < len(children_ids):
+                    row_indices.append(idx)
+                    used_indices.add(idx)
+                else:
+                    invalid_found = True
+            except ValueError:
+                invalid_found = True
+        if row_indices:
+            layout_by_indices.append(row_indices)
+
+    if invalid_found:
+        await update.message.reply_text(
+            f"❌ برخی شماره‌ها نامعتبر بودند. تعداد کل دکمه‌های این پوشه {len(children_ids)} عدد است."
+        )
+        return
+
+    # تبدیل ایندکس‌ها به IDهای واقعی پوشه‌ها
+    new_layout = []
+    for row in layout_by_indices:
+        row_ids = [children_ids[idx] for idx in row]
+        new_layout.append(row_ids)
+
+    # پیدا کردن دکمه‌هایی که ادمین در دستور وارد نکرده تا گم نشوند
+    missing_ids = [c_id for idx, c_id in enumerate(children_ids) if idx not in used_indices]
+    
+    # دکمه‌های فراموش شده را در ردیف‌های پیش‌فرض (بر اساس max_cols) به انتهای لایوت اضافه می‌کنیم
+    if missing_ids:
+        max_cols = node.get("row_count", 2)
+        for i in range(0, len(missing_ids), max_cols):
+            new_layout.append(missing_ids[i:i+max_cols])
+
+    # همچنین ترتیب اصلی children را بر اساس این لایوت جدید مرتب می‌کنیم تا ترتیب فیزیکی دیتابیس هم درست بماند
+    ordered_children = []
+    for row in new_layout:
+        ordered_children.extend(row)
+    
+    # پشتیبانی از undo/redo
+    push_admin_history(context, db)
+
+    # آپدیت دیتابیس
+    db[current_node_id]["layout"] = new_layout
+    db[current_node_id]["children"] = ordered_children
+
+    # لاگ‌گیری
+    bot_username = context.bot.username
+    node_name = node["name"]
+    node_link = get_link(current_node_id, node_name, bot_username)
+    
+    desc = f"📐 چیدمان و ترتیب دکمه‌های پوشه {node_link} به صورت دستی بازنویسی شد."
+    
+    log_caption = format_admin_log(update.effective_user, desc)
+    backup_caption = format_backup_caption(update.effective_user, "تغییر چیدمان سفارشی دکمه‌ها")
+    
+    set_pending_caption(context, log_caption)
+    set_pending_backup_caption(context, backup_caption)
+    
+    save_db(db, context=context)
+
+    await update.message.reply_text(
+        "✅ چیدمان سفارشی دکمه‌ها با موفقیت اعمال شد.",
+        reply_markup=get_keyboard(current_node_id, True, user_id=user_id)
+    )
+    return CHOOSING
+
+async def set_row_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    userdata = load_userdata()
+    is_admin = (user_id in ADMIN_IDS) or (user_id in userdata.get("sub_admins", []))
+
+    if not is_admin:
+        return
+
+    command = update.message.text.lower() # مثلا "/3"
+    
+    # استخراج عدد از دستور
+    try:
+        count = int(command.replace("/", ""))
+        if not (1 <= count <= 6): # محدودیت منطقی بین 1 تا 6
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً عدد بین ۱ تا ۶ وارد کنید. مثال: /3")
+        return
+
+    current_node_id = context.user_data.get("current_node", "root")
+    db = load_db()
+
+    if current_node_id not in db:
+        await update.message.reply_text("❌ پوشه فعلی در دیتابیس پیدا نشد.")
+        return
+
+    push_admin_history(context, db)
+    
+    old_count = db[current_node_id].get("row_count", 2)
+    db[current_node_id]["row_count"] = count
+    
+    bot_username = context.bot.username
+    node_name = db[current_node_id]["name"]
+    node_link = get_link(current_node_id, node_name, bot_username)
+    
+    desc = (
+        f"🔢 تعداد ستون‌های پوشه {node_link} "
+        f"از «{old_count}» به «{count}» تغییر کرد."
+    )
+    
+    log_caption = format_admin_log(update.effective_user, desc)
+    backup_caption = format_backup_caption(update.effective_user, "تغییر تعداد ستون دکمه‌ها")
+    
+    set_pending_caption(context, log_caption)
+    set_pending_backup_caption(context, backup_caption)
+    
+    save_db(db, context=context)
+
+    await update.message.reply_text(
+        f"✅ تعداد ستون‌ها برای این پوشه به {count} تغییر یافت.",
+        reply_markup=get_keyboard(current_node_id, True, user_id=user_id)
     )
 
-    # برای اطمینان از محدودیت کپشن فایل تلگرام
-    return text[:1000]
+    return CHOOSING
+
 
 #------ دکمه های رنگی ----------
 async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -741,7 +906,7 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return CHOOSING
 
-# ========= reactions ===============
+# ========= reactions =====================
 
 
 # ========= favorite folder ===============
@@ -918,7 +1083,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_emojis = [r.emoji for r in reaction.new_reaction]
     old_emojis = [r.emoji for r in reaction.old_reaction]
 
-    HEARTS = {"❤", "❤️"}
+    HEARTS = {"❤", "❤️", "❤️‍🔥"}
     DISLIKES = {"👎", "🖕", "💩"}
 
     added_heart = any(e in HEARTS for e in new_emojis) and not any(e in HEARTS for e in old_emojis)
@@ -1071,6 +1236,7 @@ async def clear_favorites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     return CHOOSING
 
+
 # --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS --- --- KEYBOARD BUILDERS -
 
 def get_keyboard(node_id, is_admin, user_id=None):
@@ -1080,30 +1246,64 @@ def get_keyboard(node_id, is_admin, user_id=None):
     if not node:
         return ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
 
+    children_ids = node.get("children", [])
+    layout = node.get("layout")  # 💡 خواندن لایوت سفارشی (در صورت وجود)
+    max_cols = node.get("row_count", 2)  # 💡 خواندن تعداد ستون پیش‌فرض (۲)
+
     keyboard = []
 
-    # --- دکمه‌های فرزند (همان کدی که داشتی) ---
-    children_ids = node.get("children", [])
-    row = []
+    # تابع کمکی داخلی برای ساخت دکمه با یا بدون استایل رنگی
+    def make_button(c_id):
+        child_node = db.get(c_id)
+        if not child_node:
+            return None
+        btn_style = child_node.get("style")
+        if btn_style:
+            return KeyboardButton(
+                text=child_node["name"],
+                api_kwargs={"style": btn_style}
+            )
+        return KeyboardButton(text=child_node["name"])
 
-    for child_id in children_ids:
-        child_node = db.get(child_id)
-        if child_node:
-            btn_style = child_node.get("style")
-            if btn_style:
-                button = KeyboardButton(
-                    text=child_node["name"],
-                    api_kwargs={"style": btn_style}
-                )
-            else:
-                button = KeyboardButton(text=child_node["name"])
-            row.append(button)
-            
-            if len(row) == 2:
+    # سناریو ۱: اگر لایوت دستی (سفارشی) وجود دارد
+    if layout and isinstance(layout, list):
+        for row in layout:
+            keyboard_row = []
+            for child_id in row:
+                # اطمینان از اینکه دکمه هنوز در لیست children وجود دارد و حذف نشده است
+                if child_id in children_ids:
+                    btn = make_button(child_id)
+                    if btn:
+                        keyboard_row.append(btn)
+            if keyboard_row:
+                keyboard.append(keyboard_row)
+
+        # 💡 بررسی اطمینان: اگر دکمه‌ای در children هست ولی به هر دلیلی در لایوت نیست (مثلاً دکمه جدید)
+        flattened_layout = [item for sublist in layout for item in sublist]
+        extra_row = []
+        for child_id in children_ids:
+            if child_id not in flattened_layout:
+                btn = make_button(child_id)
+                if btn:
+                    extra_row.append(btn)
+                if len(extra_row) == max_cols:
+                    keyboard.append(extra_row)
+                    extra_row = []
+        if extra_row:
+            keyboard.append(extra_row)
+
+    # سناریو ۲: در غیر این صورت، چینش عادی بر اساس تعداد ستون‌ها (row_count)
+    else:
+        row = []
+        for child_id in children_ids:
+            btn = make_button(child_id)
+            if btn:
+                row.append(btn)
+            if len(row) == max_cols:
                 keyboard.append(row)
                 row = []
-    if row:
-        keyboard.append(row)
+        if row:
+            keyboard.append(row)
 
     # ========= favorite folder ===============
     if user_id:
@@ -1962,13 +2162,14 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # ۱) تابع کمکی اصلاح شده برای تولید ساختار لاگ ادمین
 # ==========================================
 
-# تابع کمکی استخراج جزئیات دقیق فایل‌ها و متون برای بخش لاگ
+# ======= تابع کمکی استخراج جزئیات دقیق فایل‌ها و متون برای بخش لاگ ==== برای حذف و اضافه فایل ها ============#
 def get_item_log_details(item, index: int, bot_username: str = None) -> str:
     msg_type = item.get("type", "text")
     if msg_type == "text":
         text_content = item.get("text", "")
         text_escaped = escape(text_content)
         preview = text_escaped[:200] + "..." if len(text_escaped) > 200 else text_escaped
+        #preview = text_escaped[:4096] + "..." if len(text_escaped) > 4096 else text_escaped
         return f"📝 <b>پیام متنی {index}:</b>\n<blockquote expandable>{preview}</blockquote>"
     
     file_id = item.get("file_id", "")
@@ -1981,6 +2182,7 @@ def get_item_log_details(item, index: int, bot_username: str = None) -> str:
         f"🔑 شناسه فایل:\n<code>{file_id}</code>\n"
         f"✍️ کپشن: <blockquote expandable>{caption_escaped}</blockquote>"
     )
+# ================= فرمت کپشن برای فایل بکاپ ===================
 
 def format_admin_log(admin_user, description):
     admin_link = get_admin_link(admin_user)
@@ -2016,6 +2218,8 @@ def split_html_message_by_lines(text: str, max_len: int = 3000) -> list:
     if current_chunk:
         chunks.append("\n".join(current_chunk))
     return chunks
+
+# ================= هدر لاگ تغییرات ادمین===================
 
 def format_backup_caption(admin_user, action_type):
     admin_link = get_admin_link(admin_user)
@@ -2498,7 +2702,7 @@ async def handle_reply_change(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     return WAITING_CONTENT
 
-
+# ======= سرچ هوشمند ======= # # ======= سرچ هوشمند ======= # # ======= سرچ هوشمند ======= #
 def get_subtree_db(db, root_node_id):
     subtree = {}
 
@@ -2519,13 +2723,12 @@ def get_subtree_db(db, root_node_id):
             return
 
         node = copy.deepcopy(db[node_id])
-
         search_context = build_search_context(node_id)
-
-        # متن جستجو را مستقیماً داخل name قرار می‌دهیم
         node["name"] = search_context
 
-        subtree[node_id] = node
+        # ✅ اگر نود فعلی همان ریشه جستجو باشد و ریشه اصلی (root) نباشد، خود نود را در دیتابیس جستجو قرار نده.
+        if node_id != root_node_id or root_node_id == "root":
+            subtree[node_id] = node
 
         for child in db[node_id].get("children", []):
             add_node_recursive(child)
@@ -2535,54 +2738,141 @@ def get_subtree_db(db, root_node_id):
 
 async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, is_admin: bool):
     full_db = load_db()
+
+    user = update.effective_user
+    if not user:
+        return CHOOSING
+
+    user_id = str(user.id)
     current_node = context.user_data.get("current_node", "root")
-    
-    # محدود کردن جستجو فقط به زیرشاخه فعلی
-    subtree_db = get_subtree_db(full_db, current_node)
-    
-    # جستجو در زیرشاخه
+
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+
+    # اگر کاربر در userdata نبود، ثبت اولیه شود
+    if user_id not in users:
+        track_user_activity(update, count_message=False)
+        userdata = load_userdata()
+        users = userdata.setdefault("users", {})
+
+    # دیفالت = root
+    search_mode = users.get(user_id, {}).get("search_mode", "root")
+
+    # تعیین محدوده جستجو
+    if search_mode == "current_node":
+        search_root = current_node
+        mode_title = "Current Folder Search"
+        mode_desc = "جستجو فقط در پوشه فعلی و زیرشاخه‌های آن انجام شد."
+    else:
+        search_root = "root"
+        mode_title = "General Search"
+        mode_desc = "جستجو در کل کتابخانه انجام شد."
+
+    subtree_db = get_subtree_db(full_db, search_root)
+
+    # جستجو
     results = smart_search(subtree_db, text, limit=5, min_score=45)
 
     help_text = (
+        "💡 برای تغییر حالت جستجو، از دستور /search_mode استفاده کنید.\n"
         "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_off_search استفاده کنید."
     )
 
     if not results:
+        if search_mode == "current_node":
+            not_found_text = (
+                "🔍 نتیجه‌ای در <b>Current Folder Search</b> یافت نشد.\n\n"
+                "⚠️ توجه!\n"
+                "جستجو فقط در پوشه فعلی و زیرشاخه‌های آن انجام شده است.\n"
+                "اگر می‌خواهید در کل کتابخانه جستجو شود، /search_mode را بزنید."
+            )
+        else:
+            not_found_text = (
+                "🔍 نتیجه‌ای در <b>General Search</b> یافت نشد.\n\n"
+                "جستجو در کل کتابخانه انجام شد اما نتیجه‌ای پیدا نشد."
+            )
+
         await update.message.reply_text(
-            f"""🔍 نتیجه‌ای در این پوشه یافت نشد.
-        
-        ⚠️ توجه!
-        فقط مسیرهای موجود در پوشه فعلی جستجو می‌شوند.
-        برای جستجوی کل کتابخانه، ابتدا به صفحه اصلی بروید.
-        
-        {help_text}""",
+            f"{not_found_text}\n\n{help_text}",
             parse_mode="HTML"
         )
         return CHOOSING
 
     bot_username = context.bot.username
-    msg = "🔍 نتایج یافت شده در این پوشه:\n\n"
+
+    msg = (
+        f"🔎 <b>{mode_title}</b>\n"
+        f"{mode_desc}\n\n"
+        f"🔍 نتایج یافت شده:\n\n"
+    )
 
     for item in results:
         node_id = item["node_id"]
-        # دریافت مسیر کامل از دیتابیس اصلی
-        path_text = get_node_path_text(full_db, node_id)
-        
-        # ساخت دیپ‌لینک
-        deep_link = f"https://t.me/{bot_username}?start={node_id}"
-        
-        # فرمت‌دهی با لینک HTML (قابل کلیک)
-        msg += f"📂 <a href='{deep_link}'>{path_text}</a>\n"
+
+        path_html = get_node_path_html(full_db, node_id, bot_username)
+
+        msg += f"📂 {path_html}\n"
         msg += f"درصد تطابق: {int(item['score'])}٪\n\n"
 
-    msg += " 🪄 روی مسیر آبی‌رنگ کلیک کنید تا مستقیم به آنجا بروید. \n"
-    msg += help_text
+    msg += (
+        "🪄 روی هر بخش از مسیر آبی‌رنگ کلیک کنید تا مستقیم به همان پوشه بروید.\n\n"
+        f"{help_text}"
+    )
 
     await update.message.reply_text(
-        msg, 
-        parse_mode="HTML", 
+        msg,
+        parse_mode="HTML",
         disable_web_page_preview=True
     )
+
+    return CHOOSING
+
+async def toggle_search_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return CHOOSING
+
+    user_id = str(user.id)
+    userdata = load_userdata()
+    users = userdata.setdefault("users", {})
+
+    # اگر کاربر هنوز در userdata نبود، اول ثبتش کن
+    if user_id not in users:
+        track_user_activity(update, count_message=False)
+        userdata = load_userdata()
+        users = userdata.setdefault("users", {})
+
+    old_mode = users.get(user_id, {}).get("search_mode", "root")
+
+    # toggle
+    new_mode = "current_node" if old_mode == "root" else "root"
+
+    users[user_id]["search_mode"] = new_mode
+
+    # ذخیره + آپلود
+    save_userdata(userdata, upload=True)
+
+    if new_mode == "root":
+        await update.message.reply_text(
+            "🌍 حالت جستجو روی <b>General Search</b> قرار گرفت.\n"
+            "از این به بعد جستجو در <b>کل کتابخانه</b> انجام می‌شود.",
+            parse_mode="HTML"
+        )
+    else:
+        current_node = context.user_data.get("current_node", "root")
+
+        if current_node == "root":
+            await update.message.reply_text(
+                "📂 حالت جستجو روی <b>Current Folder Search</b> قرار گرفت.\n"
+                "الان شما در روت هستید، پس عملاً جستجو روی کل ساختار روت انجام می‌شود.",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                "📂 حالت جستجو روی <b>Current Folder Search</b> قرار گرفت.\n"
+                "از این به بعد جستجو فقط در <b>پوشه فعلی و زیرشاخه‌های آن</b> انجام می‌شود.",
+                parse_mode="HTML"
+            )
 
     return CHOOSING
 
@@ -2806,6 +3096,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await send_start_page(update, context)
     return CHOOSING
+
+# ========= خارج کردن پیام start  از هاردکد==============
 
 def get_start_page_contents():
     userdata = load_userdata()
@@ -5248,27 +5540,36 @@ def extract_message_content(msg):
         }
 
     if msg.video:
+        # استخراج اسم ویدیو در صورت وجود
+        file_name = getattr(msg.video, "file_name", None)
         return {
             "type": "video",
             "file_id": msg.video.file_id,
+            "file_name": file_name, # ذخیره اسم فایل
             "caption": raw_caption,
             "entities": msg_caption_entities,
             "media_group_id": media_group_id,
         }
 
     if msg.document:
+        # سند حتماً file_name دارد
+        file_name = getattr(msg.document, "file_name", None)
         return {
             "type": "document",
             "file_id": msg.document.file_id,
+            "file_name": file_name, # ذخیره اسم فایل
             "caption": raw_caption,
             "entities": msg_caption_entities,
             "media_group_id": media_group_id,
         }
 
     if msg.audio:
+        # فایل صوتی ممکن است title داشته باشد یا file_name
+        file_name = getattr(msg.audio, "file_name", None) or getattr(msg.audio, "title", None)
         return {
             "type": "audio",
             "file_id": msg.audio.file_id,
+            "file_name": file_name, # ذخیره اسم فایل
             "caption": raw_caption,
             "entities": msg_caption_entities,
             "media_group_id": media_group_id,
@@ -5284,9 +5585,11 @@ def extract_message_content(msg):
         }
 
     if msg.animation:
+        file_name = getattr(msg.animation, "file_name", None)
         return {
             "type": "animation",
             "file_id": msg.animation.file_id,
+            "file_name": file_name, # ذخیره اسم فایل
             "caption": raw_caption,
             "entities": msg_caption_entities,
             "media_group_id": media_group_id,
@@ -5720,6 +6023,15 @@ def build_application():
     application.add_handler(CommandHandler("clear", clear_favorites_cmd), group=0)
     application.add_handler(CommandHandler("on_off_favorite", on_off_favorite))
     application.add_handler(CommandHandler("on_off_search", toggle_smart_search), group=0)
+    application.add_handler(CommandHandler("1", set_row_count), group=0)
+    application.add_handler(CommandHandler("2", set_row_count), group=0)
+    application.add_handler(CommandHandler("3", set_row_count), group=0)
+    application.add_handler(CommandHandler("4", set_row_count), group=0)
+    application.add_handler(CommandHandler("5", set_row_count), group=0)
+    application.add_handler(CommandHandler("6", set_row_count), group=0)
+    # در کنار هندلرهای سراسری دیگر در build_application
+    application.add_handler(CommandHandler("style", set_custom_layout), group=0)
+
     
     application.add_handler(
         MessageReactionHandler(handle_reaction, message_reaction_types=MessageReactionHandler.MESSAGE_REACTION), 
@@ -5747,6 +6059,8 @@ def build_application():
                 CommandHandler("file_id", file_id_command), # 👈 اضافه شدن کامند جدید به منو
                 CommandHandler("change", handle_reply_change),
                 CommandHandler("del", handle_reply_delete),
+                CommandHandler("search_mode", toggle_search_mode),
+                #CommandHandler("style", set_custom_layout), 
                 #CommandHandler("clear", clear_favorites_cmd),
 
                 CallbackQueryHandler(inline_handler, pattern="^reply_to_admin$"),
