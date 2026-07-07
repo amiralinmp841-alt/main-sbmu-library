@@ -761,6 +761,35 @@ async def set_custom_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return CHOOSING
 
+def cleanup_node_layout(node: dict):
+    """
+    لایوت پوشه را با children سینک می‌کند:
+    - هر دکمه‌ای که دیگر در children نیست از layout حذف می‌شود
+    - ردیف‌های خالی حذف می‌شوند
+    - اگر layout خالی شد، کل فیلد layout حذف می‌شود
+    """
+    children = node.get("children", [])
+    layout = node.get("layout")
+
+    if not layout:
+        return
+
+    valid_children = set(children)
+    cleaned_layout = []
+
+    for row in layout:
+        if not isinstance(row, list):
+            continue
+        cleaned_row = [child_id for child_id in row if child_id in valid_children]
+        if cleaned_row:
+            cleaned_layout.append(cleaned_row)
+
+    if cleaned_layout:
+        node["layout"] = cleaned_layout
+    else:
+        node.pop("layout", None)
+
+
 async def set_row_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     userdata = load_userdata()
@@ -2770,12 +2799,20 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     subtree_db = get_subtree_db(full_db, search_root)
 
-    # جستجو
-    results = smart_search(subtree_db, text, limit=5, min_score=45)
+    # جستجو: مجموعا 15 نتیجه
+    results = smart_search(subtree_db, text, limit=15, min_score=45)
 
-    help_text = (
+    help_block = (
+        "<blockquote>"
         "💡 برای تغییر حالت جستجو، از دستور /search_mode استفاده کنید.\n"
         "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_off_search استفاده کنید."
+        "</blockquote>"
+    )
+
+    path_hint_block = (
+        "<blockquote>"
+        "🪄 روی هر بخش از مسیر آبی‌رنگ کلیک کنید تا مستقیم به همان پوشه بروید."
+        "</blockquote>"
     )
 
     if not results:
@@ -2793,8 +2830,9 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         await update.message.reply_text(
-            f"{not_found_text}\n\n{help_text}",
-            parse_mode="HTML"
+            f"{not_found_text}\n\n{help_block}",
+            parse_mode="HTML",
+            disable_web_page_preview=True
         )
         return CHOOSING
 
@@ -2803,21 +2841,38 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = (
         f"🔎 <b>{mode_title}</b>\n"
         f"{mode_desc}\n\n"
-        f"🔍 نتایج یافت شده:\n\n"
+        f"🔍 نتایج یافت شده:\n"
     )
 
-    for item in results:
+    # 5 نتیجه اول
+    first_results = results[:5]
+    # 10 نتیجه بعدی
+    more_results = results[5:15]
+
+    # بلاک نتایج اول - بدون تیتر اضافه داخل بلاک
+    first_block = "<blockquote expandable>"
+    for item in first_results:
         node_id = item["node_id"]
-
         path_html = get_node_path_html(full_db, node_id, bot_username)
+        first_block += f"📂 {path_html}\n"
+        first_block += f"درصد تطابق: {int(item['score'])}٪\n\n"
+    first_block = first_block.rstrip() + "</blockquote>"
 
-        msg += f"📂 {path_html}\n"
-        msg += f"درصد تطابق: {int(item['score'])}٪\n\n"
+    msg += first_block + "\n\n"
 
-    msg += (
-        "🪄 روی هر بخش از مسیر آبی‌رنگ کلیک کنید تا مستقیم به همان پوشه بروید.\n\n"
-        f"{help_text}"
-    )
+    # بلاک نتایج بیشتر
+    if more_results:
+        msg += "📋 نتایج بیشتر:\n"
+        more_block = "<blockquote expandable>"
+        for item in more_results:
+            node_id = item["node_id"]
+            path_html = get_node_path_html(full_db, node_id, bot_username)
+            more_block += f"📂 {path_html}\n"
+            more_block += f"درصد تطابق: {int(item['score'])}٪\n\n"
+        more_block = more_block.rstrip() + "</blockquote>"
+        msg += more_block + "\n\n"
+
+    msg += path_hint_block + "\n\n" + help_block
 
     await update.message.reply_text(
         msg,
@@ -2826,6 +2881,7 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     return CHOOSING
+
 
 async def toggle_search_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -4605,7 +4661,10 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
                 # حذف از لیست فرزندان والد
                 db[current_node_id]['children'].remove(target_id)
-            
+
+                # پاکسازی چیدمان والد
+                cleanup_node_layout(db[current_node_id])
+                
                 # حذف بازگشتی کل درخت
                 delete_node_recursive(db, target_id)
 
@@ -6189,7 +6248,7 @@ async def webhook_handler(request):
 async def main():
     tg_app = build_application()
     await tg_app.initialize()
-    await tg_app.start()
+    #await tg_app.start()
     await tg_app.bot.set_webhook(
         f"{WEBHOOK_URL}/{TOKEN}",
         allowed_updates=[
