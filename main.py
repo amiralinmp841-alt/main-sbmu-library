@@ -1704,7 +1704,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 "📝 متن گزارش را ارسال کنید.\n"
-                "اگر نمی‌خواهید متنی اضافه شود، دستور /no_messager را بزنید.\n"
+                "اگر نمی‌خواهید متنی اضافه شود، دستور /no_message را بزنید.\n"
                 "برای لغو کامل گزارش، دستور /cansel را بزنید."
             )
             return WAITING_REPORT_TEXT
@@ -1749,7 +1749,7 @@ async def report_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             "📝 متن گزارش را ارسال کنید.\n"
-            "اگر نمی‌خواهید متنی اضافه شود، دستور /no_messager را بزنید.\n"
+            "اگر نمی‌خواهید متنی اضافه شود، دستور /no_message را بزنید.\n"
             "برای لغو کامل گزارش، دستور /cansel را بزنید."
         )
         return WAITING_REPORT_TEXT
@@ -2094,9 +2094,7 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
             msg_type = item.get("type")
             media_group_id = item.get("media_group_id")
 
-            # تلاش برای بازسازی آلبوم فقط وقتی:
-            # 1) media_group_id داشته باشیم
-            # 2) type از انواع groupable باشد
+            # فقط اگر media_group_id داشته باشد و type قابل گروپ باشد
             if media_group_id and msg_type in groupable_types:
                 group_items = []
                 group_indices = []
@@ -2116,63 +2114,84 @@ async def send_node_contents(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     else:
                         break
 
-                # اگر بیشتر از یک مورد پشت‌سرهم بود، به صورت media group بفرست
+                # اگر واقعاً گروه چندتایی بود
                 if len(group_items) > 1:
-                    media = []
-                    valid_group = True
-                
-                    # پیدا کردن اولین caption معتبر داخل گروه
-                    group_caption = None
-                    group_entities = None
-                
-                    for gi in group_items:
-                        cap = gi.get("caption")
-                        if cap:
-                            group_caption = cap
-                            group_entities = gi.get("entities")
-                            break
-                
-                    for idx2, group_item in enumerate(group_items):
-                        input_media = build_input_media(
-                            group_item,
-                            is_first=(idx2 == 0),
-                            forced_caption=group_caption if idx2 == 0 else None,
-                            forced_entities=group_entities if idx2 == 0 else None,
-                        )
-                        if input_media is None:
-                            valid_group = False
-                            break
-                        media.append(input_media)
-                
-                    if valid_group and media:
-                        try:
-                            sent_messages = await update.message.reply_media_group(media=media)
-                
-                            for sent, original_index in zip(sent_messages, group_indices):
-                                sent_mapping[sent.message_id] = {
-                                    "node_id": node_id,
-                                    "content_index": original_index,
-                                }
-                
-                            i = j
-                            continue
-                
-                        except Exception as group_error:
-                            logging.error(f"Error sending media group: {group_error}")
-                
-                            for group_item, original_index in zip(group_items, group_indices):
-                                try:
-                                    sent_msg = await send_single_content(update.message, group_item)
-                                    if sent_msg:
-                                        sent_mapping[sent_msg.message_id] = {
-                                            "node_id": node_id,
-                                            "content_index": original_index,
-                                        }
-                                except Exception as single_error:
-                                    logging.error(f"Fallback single send failed: {single_error}")
-                
-                            i = j
-                            continue
+                    # captionهای غیرخالی را پیدا کن
+                    captioned_items = [
+                        gi for gi in group_items
+                        if (gi.get("caption") or "").strip()
+                    ]
+
+                    # فقط 0 یا 1 caption => به صورت media_group
+                    if len(captioned_items) <= 1:
+                        media = []
+                        valid_group = True
+
+                        group_caption = None
+                        group_entities = None
+
+                        if captioned_items:
+                            group_caption = captioned_items[0].get("caption")
+                            group_entities = captioned_items[0].get("entities")
+
+                        for idx2, group_item in enumerate(group_items):
+                            input_media = build_input_media(
+                                group_item,
+                                is_first=(idx2 == 0),
+                                forced_caption=group_caption if idx2 == 0 else None,
+                                forced_entities=group_entities if idx2 == 0 else None,
+                            )
+                            if input_media is None:
+                                valid_group = False
+                                break
+                            media.append(input_media)
+
+                        if valid_group and media:
+                            try:
+                                sent_messages = await update.message.reply_media_group(media=media)
+
+                                for sent, original_index in zip(sent_messages, group_indices):
+                                    sent_mapping[sent.message_id] = {
+                                        "node_id": node_id,
+                                        "content_index": original_index,
+                                    }
+
+                                i = j
+                                continue
+
+                            except Exception as group_error:
+                                logging.error(f"Error sending media group: {group_error}")
+
+                                # fallback: ارسال تکی
+                                for group_item, original_index in zip(group_items, group_indices):
+                                    try:
+                                        sent_msg = await send_single_content(update.message, group_item)
+                                        if sent_msg:
+                                            sent_mapping[sent_msg.message_id] = {
+                                                "node_id": node_id,
+                                                "content_index": original_index,
+                                            }
+                                    except Exception as single_error:
+                                        logging.error(f"Fallback single send failed: {single_error}")
+
+                                i = j
+                                continue
+
+                    # اگر بیشتر از یک caption داشت => ارسال تکی‌تکی
+                    else:
+                        for group_item, original_index in zip(group_items, group_indices):
+                            try:
+                                sent_msg = await send_single_content(update.message, group_item)
+                                if sent_msg:
+                                    sent_mapping[sent_msg.message_id] = {
+                                        "node_id": node_id,
+                                        "content_index": original_index,
+                                    }
+                            except Exception as single_error:
+                                logging.error(f"Multi-caption single send failed: {single_error}")
+
+                        i = j
+                        continue
 
             # حالت عادی: ارسال تکی
             sent_msg = await send_single_content(update.message, item)
@@ -2805,7 +2824,7 @@ async def handle_smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     help_block = (
         "<blockquote>"
         "💡 برای تغییر حالت جستجو، از دستور /search_mode استفاده کنید.\n"
-        "💡 برای خاموش یا روشن کردن جستجوی هوشمند، از دستور /on_off_search استفاده کنید."
+        "💡 برای خاموش یا روشن‌کردن جستجوی هوشمند، از دستور /on_off_search استفاده کنید."
         "</blockquote>"
     )
 
@@ -6149,7 +6168,7 @@ def build_application():
             ],
 
             WAITING_REPORT_TEXT: [
-                CommandHandler("no_messager", report_without_message),
+                CommandHandler("no_message", report_without_message),
                 CommandHandler("cansel", cancel_report),
                 MessageHandler(filters.TEXT & (~filters.COMMAND), receive_report_text),
             ],
