@@ -688,6 +688,7 @@ async def set_custom_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     layout_by_indices = []
     used_indices = set()
     invalid_found = False
+    duplicate_found = False
 
     for line in lines[1:]: # از خط دوم به بعد
         line = line.strip()
@@ -713,6 +714,13 @@ async def set_custom_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if duplicate_found:
+        await update.message.reply_text(
+            "❌ بعضی شماره‌ها تکراری بودند.\n"
+            "هر دکمه فقط باید یک‌بار در چیدمان بیاید."
+        )
+        return
+        
     # تبدیل ایندکس‌ها به IDهای واقعی پوشه‌ها
     new_layout = []
     for row in layout_by_indices:
@@ -924,9 +932,10 @@ async def set_node_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_pending_backup_caption(context, backup_caption)
     
     save_db(db, context=context)
-
+    
     parent_id = db[current_node_id].get("parent", "root")
     context.user_data["current_node"] = parent_id
+    set_report_page(context, parent_id)
 
     await update.message.reply_text(
         f"✅ رنگ این پوشه به «{new_color_name}» تغییر یافت.",
@@ -998,6 +1007,36 @@ def clear_all_favorites(user_id):
     if "favorites" in user_record:
         user_record["favorites"] = []
         save_userdata(userdata, upload=True) # ذخیره و آپلود نهایی
+
+def prune_invalid_favorites(user_id: int | str, userdata: dict, db: dict) -> list:
+    user_id = str(user_id)
+    user = userdata.setdefault("users", {}).setdefault(user_id, {})
+    favorites = user.get("favorites", [])
+
+    valid_favorites = []
+    changed = False
+
+    for fav in favorites:
+        node_id = fav.get("node_id")
+        content_index = fav.get("content_index")
+
+        node = db.get(node_id)
+        if not node:
+            changed = True
+            continue
+
+        contents = node.get("contents", [])
+        if not isinstance(content_index, int) or not (0 <= content_index < len(contents)):
+            changed = True
+            continue
+
+        valid_favorites.append(fav)
+
+    if changed:
+        user["favorites"] = valid_favorites
+        save_userdata(userdata)
+
+    return valid_favorites
 
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4500,7 +4539,7 @@ async def handle_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📁 پوشه دلخواه":
         userdata = load_userdata()
         users = userdata.get("users", {})
-        favorites = userdata.get("users", {}).get(str(user_id), {}).get("favorites", [])
+        favorites = prune_invalid_favorites(user_id, userdata, db)
         favorites_disabled = users.get(str(user_id), {}).get("favorites_disabled", False)
         if favorites_disabled:
             await update.message.reply_text("❌ شما پوشه دلخواه را غیرفعال کرده‌اید.\n\n⚙️ جهت فعال کردن آن، از دستور /on_off_favorite، استفاده کنید.")
