@@ -689,37 +689,48 @@ async def set_custom_layout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     used_indices = set()
     invalid_found = False
     duplicate_found = False
-
-    for line in lines[1:]: # از خط دوم به بعد
+    
+    for line in lines[1:]:  # از خط دوم به بعد
         line = line.strip()
         if not line:
             continue
+    
         row_indices = []
         for num_str in line.split():
             try:
-                idx = int(num_str) - 1 # تبدیل به index (شروع از 0)
-                if 0 <= idx < len(children_ids):
-                    row_indices.append(idx)
-                    used_indices.add(idx)
-                else:
+                idx = int(num_str) - 1  # تبدیل به index (شروع از 0)
+    
+                if not (0 <= idx < len(children_ids)):
                     invalid_found = True
+                    continue
+    
+                # جلوگیری از تکراری بودن
+                if idx in used_indices:
+                    duplicate_found = True
+                    continue
+    
+                row_indices.append(idx)
+                used_indices.add(idx)
+    
             except ValueError:
                 invalid_found = True
+    
         if row_indices:
             layout_by_indices.append(row_indices)
-
+    
     if invalid_found:
         await update.message.reply_text(
             f"❌ برخی شماره‌ها نامعتبر بودند. تعداد کل دکمه‌های این پوشه {len(children_ids)} عدد است."
         )
         return
-
+    
     if duplicate_found:
         await update.message.reply_text(
             "❌ بعضی شماره‌ها تکراری بودند.\n"
             "هر دکمه فقط باید یک‌بار در چیدمان بیاید."
         )
         return
+    
         
     # تبدیل ایندکس‌ها به IDهای واقعی پوشه‌ها
     new_layout = []
