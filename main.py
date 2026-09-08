@@ -99,6 +99,7 @@ from score import (
     receive_national_id,
     handle_score_deeplink,
 )
+from game import game_start, build_game_handler
 
 def delete_node_recursive(db, node_id):
     # اگر نود وجود نداشت
@@ -3486,6 +3487,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return CHOOSING
 
     # =====================================================
+    # game hacker
+    # =====================================================  
+
+    if args and args[0].lower() == "hack":
+        return await game_start(update, context)
+    
+    # =====================================================
     # 🏠 START عادی
     # بدون Deep Link
     # =====================================================
@@ -6689,6 +6697,7 @@ def build_application():
     application.add_handler(CommandHandler("style", set_custom_layout), group=0)
     application.add_handler(CommandHandler("miniapp", miniapp_command), group=0)
     application.add_handler(CommandHandler("help", send_help_page), group=0)
+    application.add_handler(build_game_handler(), group=0) 
 
     application.add_handler(
         MessageReactionHandler(handle_reaction, message_reaction_types=MessageReactionHandler.MESSAGE_REACTION), 
