@@ -788,8 +788,8 @@ def normalize_national_id(value):
     national_id = match.group(1)
 
     # کد ملی معتبر باید دقیقاً 10 رقم باشد
-    if len(national_id) != 10:
-        return None
+    #if len(national_id) != 10:
+    #    return None
 
     return national_id
 
