@@ -1293,13 +1293,13 @@ async def receive_national_id(
 
     national_id = normalize_national_id(text)
 
-    if not national_id:
-
-        await update.message.reply_text(
-            "❌ لطفاً یک کد ملی معتبر ارسال کنید."
-        )
-
-        return SCORE_WAITING_NATIONAL_ID
+    #if not national_id:
+#
+    #    await update.message.reply_text(
+    #        "❌ لطفاً یک کد ملی معتبر ارسال کنید."
+    #    )
+#
+    #    return SCORE_WAITING_NATIONAL_ID
 
     course_id = context.user_data.get(
         "score_course_id"
