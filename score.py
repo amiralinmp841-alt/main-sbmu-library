@@ -778,7 +778,7 @@ def normalize_national_id(value):
 
     # پیدا کردن عدد دقیقاً 10 رقمی
     match = re.search(
-        r"(?<!\d)(\d{10})(?!\d)",
+        r"(?<!\d)(\d{16})(?!\d)",
         cleaned
     )
 
@@ -826,7 +826,7 @@ def normalize_score(value):
 
         # جلوگیری از اینکه هر عددی به عنوان نمره شناخته شود
         # محدوده نمره 0 تا 20
-        if 0 <= score_number <= 20:
+        if 0 <= score_number <= 400:
 
             # اگر عدد صحیح بود
             if score_number.is_integer():
@@ -1269,7 +1269,7 @@ async def handle_score_deeplink(
     await update.effective_message.reply_text(
         "📊 <b>دریافت نمره امتحان</b>\n\n"
         f"📚 آزمون / درس: <b>{course.get('name')}</b>\n\n"
-        "لطفاً <b>کد ملی</b> خود را ارسال کنید.\n\n"
+        "لطفاً <b>کد خود</b> خود را ارسال کنید.\n\n"
         "برای برگشت به حالت عادی ربات، "
         "دستور /start را بزنید.",
         parse_mode="HTML"
