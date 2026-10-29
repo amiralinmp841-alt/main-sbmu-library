@@ -41,6 +41,20 @@ MOBIN_BACKUP_ZIP = "/tmp/mobin_backup.zip"
 MOBIN_RESTORE_ZIP = "/tmp/mobin_restore.zip"
 DEFAULT_PASSWORD = "من مبینم"
 
+# کش برای ری‌اکشن‌های سراسری (فقط برای حالت All)
+_reactions_cache = {
+    "list": None,
+    "fetched_at": 0,
+    "ttl": 12 * 60 * 60,
+}
+
+# لیست پیش‌فرض امن (فقط اگه هیچ‌چیز جواب نداد)
+_FALLBACK_EMOJIS = [
+    "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔",
+    "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩",
+    "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳",
+]
+
 # ---------- STATES ----------
 (
     MOBIN_ROOT,
@@ -150,16 +164,10 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 def dedup_sessions_on_disk() -> dict:
-    """
-    پوشه session‌ها رو اسکن می‌کنه و اگه چند فایل با محتوای یکسان بود،
-    فقط یکیش رو نگه می‌دارد (اولی از نظر ترتیب اسم) و بقیه رو حذف می‌کند.
-
-    Returns: {"removed": [names], "kept": int}
-    """
     if not os.path.isdir(MOBIN_SESSIONS_DIR):
         return {"removed": [], "kept": 0}
 
-    seen: dict[str, str] = {}   # hash → name
+    seen: dict[str, str] = {}
     removed: list[str] = []
 
     for name in sorted(list_sessions()):
@@ -289,7 +297,7 @@ def _format_import_report(result: dict) -> str:
     return "\n".join(lines)
 
 # =========================================================
-# HEALTH CHECK (فعال بودن session‌ها)
+# HEALTH CHECK
 # =========================================================
 async def check_all_sessions_health() -> dict:
     sessions = list_sessions()
@@ -384,6 +392,124 @@ def restore_mobin_from_telegram() -> bool:
     except Exception as e:
         mobin_logger.error(f"restore_mobin failed: {e}")
         return False
+
+# =========================================================
+# AVAILABLE REACTIONS (per-channel)
+# =========================================================
+async def _get_available_reactions(
+    peer_str: str | None = None,
+    forward_info: dict | None = None,
+) -> list[str]:
+    """
+    ری‌اکشن‌های مجاز مخصوص یک کانال/گروه را برمی‌گرداند.
+    - chatReactionsNone  → لیست خالی
+    - chatReactionsAll   → لیست سراسری (fallback)
+    - chatReactionsSome  → فقط ایموجی‌های همون کانال
+    """
+    sessions = list_sessions()
+    if not sessions:
+        return list(_FALLBACK_EMOJIS)
+
+    data = load_mobin_data()
+    api_id = data.get("api_id", 2040)
+    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+    sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{sessions[0]}.session")
+
+    client = TelegramClient(sess_path, api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return list(_FALLBACK_EMOJIS)
+
+        # ۱) entity کانال رو resolve کن
+        entity = None
+        if forward_info:
+            try:
+                entity = await client.get_entity(forward_info["chat_id"])
+            except Exception:
+                entity = None
+        elif peer_str:
+            try:
+                entity = await client.get_entity(peer_str)
+            except Exception:
+                entity = None
+
+        if entity is None:
+            return list(_FALLBACK_EMOJIS)
+
+        # ۲) full info کانال/گروه رو بگیر
+        chat_reactions = None
+        try:
+            full = await client(functions.channels.GetFullChannelRequest(entity))
+            chat_reactions = getattr(full.full_chat, "available_reactions", None)
+        except Exception:
+            try:
+                full = await client(functions.messages.GetFullChatRequest(entity.id))
+                chat_reactions = getattr(full.full_chat, "available_reactions", None)
+            except Exception:
+                chat_reactions = None
+
+        if chat_reactions is None:
+            return await _get_global_reactions(client)
+
+        # ۳) تشخیص نوع ChatReactions
+        class_name = type(chat_reactions).__name__
+
+        if "None" in class_name:
+            return []
+
+        if "All" in class_name:
+            return await _get_global_reactions(client)
+
+        if "Some" in class_name:
+            reactions = getattr(chat_reactions, "reactions", [])
+            emojis = []
+            for r in reactions:
+                emoticon = getattr(r, "emoticon", None)
+                if emoticon:
+                    emojis.append(emoticon)
+            if emojis:
+                return emojis
+            return []
+
+        return await _get_global_reactions(client)
+
+    except Exception as e:
+        mobin_logger.error(f"get_available_reactions failed: {e}")
+        return list(_FALLBACK_EMOJIS)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _get_global_reactions(client) -> list[str]:
+    """لیست سراسری ری‌اکشن‌های مجاز تلگرام (fallback)."""
+    now = time.time()
+    if (_reactions_cache["list"] is not None
+            and now - _reactions_cache["fetched_at"] < _reactions_cache["ttl"]):
+        return _reactions_cache["list"]
+
+    try:
+        result = await client(functions.messages.GetAvailableReactionsRequest(hash=0))
+        reactions_attr = getattr(result, "reactions", None)
+        if reactions_attr:
+            emojis = []
+            for r in reactions_attr:
+                react = getattr(r, "reaction", None)
+                if react is not None:
+                    emoticon = getattr(react, "emoticon", None)
+                    if emoticon:
+                        emojis.append(emoticon)
+            if emojis:
+                _reactions_cache["list"] = emojis
+                _reactions_cache["fetched_at"] = now
+                return emojis
+    except Exception as e:
+        mobin_logger.error(f"get_global_reactions failed: {e}")
+
+    return list(_FALLBACK_EMOJIS)
 
 # =========================================================
 # REACTION TARGET PARSING
@@ -509,15 +635,14 @@ def _main_kb() -> InlineKeyboardMarkup:
 def _cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
 
-_EMOJI_CHOICES = [
-    "❤️", "🔥", "👍", "👎", "😂", "😢", "😮", "😡",
-    "🎉", "💯", "⚡", "👏", "🤔", "🙏", "👌", "💔",
-    "🌚", "🌭", "🍾", "💊", "🙈", "😍", "🤯", "🤬",
-]
-
-def _emoji_kb() -> InlineKeyboardMarkup:
+def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
+    """کیبورد اینلاین با ایموجی‌های مخصوص کانال."""
+    if not emojis:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+        ])
     kb, row = [], []
-    for e in _EMOJI_CHOICES:
+    for e in emojis[:24]:
         row.append(InlineKeyboardButton(e, callback_data=f"mobin_em_{e}"))
         if len(row) == 4:
             kb.append(row)
@@ -566,7 +691,6 @@ async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین
         )
 
 async def _auto_dedup_and_report() -> str:
-    """dedup سریع موقع باز شدن پنل. Returns پیام اضافه (اختیاری)."""
     res = dedup_sessions_on_disk()
     if res["removed"]:
         return (
@@ -733,7 +857,7 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     # =====================================================
-    # 🗑 حذف sessionهای تکراری (دستی)
+    # 🗑 حذف sessionهای تکراری
     # =====================================================
     if data == "mobin_dedup":
         before = len(list_sessions())
@@ -944,9 +1068,18 @@ async def mobin_rx_target(update: Update, context):
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
+
+        emojis = await _get_available_reactions(forward_info=fwd)
+        if not emojis:
+            await msg.reply_text(
+                "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
+                reply_markup=_cancel_kb(),
+            )
+            return MOBIN_REACTION_WAITING_TARGET
+
         await msg.reply_text(
-            "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
-            reply_markup=_emoji_kb(),
+            f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
+            reply_markup=_emoji_kb(emojis),
         )
         return MOBIN_REACTION_WAITING_EMOJI
 
@@ -964,9 +1097,17 @@ async def mobin_rx_target(update: Update, context):
     context.user_data["mobin_rx_msg_id"] = msg_id
     context.user_data["mobin_forward_info"] = None
 
+    emojis = await _get_available_reactions(peer_str=peer)
+    if not emojis:
+        await msg.reply_text(
+            "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
+            reply_markup=_cancel_kb(),
+        )
+        return MOBIN_REACTION_WAITING_TARGET
+
     await msg.reply_text(
-        "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
-        reply_markup=_emoji_kb(),
+        f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
+        reply_markup=_emoji_kb(emojis),
     )
     return MOBIN_REACTION_WAITING_EMOJI
 
