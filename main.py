@@ -218,23 +218,6 @@ MOBIN_BACKUP_CHAT_ID = int(os.getenv("MOBIN_BACKUP_CHAT_ID", "0"))
 
 ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
 
-configure_mobin(
-    admin_ids=ADMIN_IDS,
-    backup_chat_id=MOBIN_BACKUP_CHAT_ID,
-    backup_session_getter=lambda: telethon_client,   # ← همان session اصلی
-    backup_upload=upload_file_to_telegram,           # ← تابع موجود
-    backup_download=download_latest_file_from_telegram,  # ← تابع موجود
-    loop_getter=lambda: telethon_loop,
-)
-
-try:
-    if restore_mobin_from_telegram():
-        print("✅ mobin restored from Telegram")
-    else:
-        print("ℹ️ No mobin backup; empty mobin state")
-except Exception as e:
-    print(f"⚠️ mobin restore failed: {e}")
-
 tg_app = build_application()
 REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
 MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
@@ -7094,6 +7077,24 @@ async def main():
             f"⚠️ Score startup restore failed: {e}"
         )
 
+
+    configure_mobin(
+        admin_ids=ADMIN_IDS,
+        backup_chat_id=MOBIN_BACKUP_CHAT_ID,
+        backup_session_getter=lambda: telethon_client,   # ← همان session اصلی
+        backup_upload=upload_file_to_telegram,           # ← تابع موجود
+        backup_download=download_latest_file_from_telegram,  # ← تابع موجود
+        loop_getter=lambda: telethon_loop,
+    )
+
+    try:
+        if restore_mobin_from_telegram():
+            print("✅ mobin restored from Telegram")
+        else:
+            print("ℹ️ No mobin backup; empty mobin state")
+    except Exception as e:
+        print(f"⚠️ mobin restore failed: {e}")
+        
     tg_app = build_application()
     await tg_app.initialize()
     await tg_app.start()
