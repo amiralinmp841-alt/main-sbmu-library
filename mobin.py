@@ -143,177 +143,136 @@ def delete_all_sessions() -> int:
     return count
 
 # =========================================================
-# ANTI-DUPLICATE SESSION IMPORT
+# ANTI-DUPLICATE SESSION IMPORT (name-agnostic)
 # =========================================================
-def _file_sha256(data: bytes) -> str:
-    """هش SHA256 از محتوای بایت‌ها — برای تشخیص session یکسان."""
+def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-def _existing_session_hashes() -> dict[str, str]:
-    """map از hash → session_name برای همه session های موجود روی دیسک."""
-    result: dict[str, str] = {}
+def _existing_session_hashes() -> set[str]:
+    """مجموعه hash محتوای همه session های موجود روی دیسک."""
+    hashes: set[str] = set()
     if not os.path.isdir(MOBIN_SESSIONS_DIR):
-        return result
+        return hashes
     for fname in os.listdir(MOBIN_SESSIONS_DIR):
         if not fname.endswith(".session") or fname.startswith("."):
             continue
-        path = os.path.join(MOBIN_SESSIONS_DIR, fname)
         try:
-            with open(path, "rb") as f:
-                result[_file_sha256(f.read())] = fname[:-8]
+            with open(os.path.join(MOBIN_SESSIONS_DIR, fname), "rb") as f:
+                hashes.add(_sha256_bytes(f.read()))
         except Exception:
             continue
-    return result
+    return hashes
 
-def import_sessions_zip(
-    raw_bytes: bytes,
-    on_conflict: str = "skip",   # "skip" | "rename"
-) -> dict:
+def _next_session_name() -> str:
+    """اسم خودکار بعدی برای session جدید — بالاترین شماره موجود + 1."""
+    existing = set(list_sessions())
+    i = 1
+    while True:
+        candidate = f"acc_{i:04d}"
+        if candidate not in existing:
+            return candidate
+        i += 1
+
+def import_sessions_zip(raw_bytes: bytes) -> dict:
     """
-    ZIP را باز می‌کند و session ها را با محافظت کامل در برابر تکرار وارد می‌کند.
+    ZIP را باز می‌کند و session ها را **مستقل از اسم فایل** وارد می‌کند.
 
-    محافظت‌ها:
-      - اسم تکراری با session های موجود       → skip (یا rename)
-      - اسم تکراری داخل خود ZIP                → skip دوم + گزارش
-      - محتوا (اکانت) تکراری با session موجود  → skip
-      - محتوا (اکانت) تکراری داخل خود ZIP      → skip دوم + گزارش
-
-    Returns:
-      {
-        "imported":      [names],
-        "skipped_name":  [(name, reason)],
-        "skipped_hash":  [(name, existing_name)],
-        "renamed":       [(old, new)],
-        "errors":        [str],
-      }
+    - اسم فایل داخل ZIP اصلاً مهم نیست (هر اسمی باشه، خودش اسم می‌ده)
+    - برای هر session، محتوا (SHA256) چک می‌شه:
+        * اگه با session موجود یکسان بود  → skip
+        * اگه با session دیگه‌ای در همین ZIP یکسان بود → skip
+    - اسم جدید: acc_0001, acc_0002, ...
     """
-    imported: list[str] = []
-    skipped_name: list[tuple[str, str]] = []
-    skipped_hash: list[tuple[str, str]] = []
-    renamed: list[tuple[str, str]] = []
+    imported: list[tuple[str, str]] = []   # (new_name, original_zip_name)
+    skipped_existing: list[tuple[str, str]] = []  # (zip_name, reason)
+    skipped_duplicate_in_zip: list[tuple[str, str]] = []  # (zip_name, first_zip_name)
     errors: list[str] = []
 
     if not os.path.isdir(MOBIN_SESSIONS_DIR):
         os.makedirs(MOBIN_SESSIONS_DIR, exist_ok=True)
 
-    existing_hashes = _existing_session_hashes()   # hash → name
-    existing_names = set(list_sessions())
+    existing_hashes = _existing_session_hashes()
+    seen_in_zip: dict[str, str] = {}   # hash → first zip entry
 
     try:
         with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
-            seen_in_zip_names: set[str] = set()
-            seen_in_zip_hashes: dict[str, str] = {}   # hash → base
-
             for entry in zf.namelist():
                 base = os.path.basename(entry)
                 if not base.endswith(".session") or base.startswith("."):
                     continue
-                sess_name = base[:-8]
-                if not sess_name:
-                    continue
 
-                # --- ۱) اسم تکراری داخل خود ZIP ---
-                if base in seen_in_zip_names:
-                    errors.append(f"{base}: اسم تکراری داخل ZIP (skip)")
-                    continue
-                seen_in_zip_names.add(base)
-
-                # خواندن محتوا
                 try:
                     data = zf.read(entry)
                 except Exception as e:
                     errors.append(f"{base}: خواندن خطا ({e})")
                     continue
 
-                content_hash = _file_sha256(data)
+                content_hash = _sha256_bytes(data)
 
-                # --- ۲) محتوای تکراری داخل خود ZIP ---
-                if content_hash in seen_in_zip_hashes:
-                    errors.append(
-                        f"{base}: محتوای یکسان با {seen_in_zip_hashes[content_hash]} در ZIP (skip)"
-                    )
-                    continue
-                seen_in_zip_hashes[content_hash] = base
-
-                # --- ۳) محتوای تکراری با session موجود (اکانت تکراری) ---
+                # ۱) تکراری با session موجود (اکانت تکراری)
                 if content_hash in existing_hashes:
-                    skipped_hash.append((sess_name, existing_hashes[content_hash]))
+                    skipped_existing.append((base, "session از قبل موجود است"))
                     continue
 
-                # --- ۴) اسم تکراری با session موجود ---
-                final_name = sess_name
-                if sess_name in existing_names:
-                    if on_conflict == "skip":
-                        skipped_name.append((sess_name, "اسم تکراری"))
-                        continue
-                    elif on_conflict == "rename":
-                        i = 1
-                        while f"{sess_name}_copy{i}" in existing_names:
-                            i += 1
-                        final_name = f"{sess_name}_copy{i}"
-                        renamed.append((sess_name, final_name))
-                    else:
-                        skipped_name.append((sess_name, f"on_conflict نامعتبر: {on_conflict}"))
-                        continue
+                # ۲) تکراری داخل خود ZIP
+                if content_hash in seen_in_zip:
+                    skipped_duplicate_in_zip.append((base, seen_in_zip[content_hash]))
+                    continue
+                seen_in_zip[content_hash] = base
 
-                # --- نوشتن فایل ---
-                final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{final_name}.session")
+                # ۳) اسم جدید بذار
+                new_name = _next_session_name()
+                final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{new_name}.session")
                 try:
                     with open(final_path, "wb") as f:
                         f.write(data)
-                    imported.append(final_name)
-                    existing_names.add(final_name)
-                    existing_hashes[content_hash] = final_name
+                    imported.append((new_name, base))
+                    existing_hashes.add(content_hash)
                 except Exception as e:
-                    errors.append(f"{final_name}: نوشتن خطا ({e})")
+                    errors.append(f"{base}: نوشتن خطا ({e})")
 
     except zipfile.BadZipFile as e:
         return {
-            "imported": [], "skipped_name": [], "skipped_hash": [],
-            "renamed": [], "errors": [f"ZIP معیوب: {e}"],
+            "imported": [], "skipped_existing": [],
+            "skipped_duplicate_in_zip": [],
+            "errors": [f"ZIP معیوب: {e}"],
         }
     except Exception as e:
         return {
-            "imported": [], "skipped_name": [], "skipped_hash": [],
-            "renamed": [], "errors": [f"خطای کلی: {e}"],
+            "imported": [], "skipped_existing": [],
+            "skipped_duplicate_in_zip": [],
+            "errors": [f"خطای کلی: {e}"],
         }
 
     return {
         "imported": imported,
-        "skipped_name": skipped_name,
-        "skipped_hash": skipped_hash,
-        "renamed": renamed,
+        "skipped_existing": skipped_existing,
+        "skipped_duplicate_in_zip": skipped_duplicate_in_zip,
         "errors": errors,
     }
 
 def _format_import_report(result: dict) -> str:
-    """ساخت متن گزارش import برای نمایش به کاربر."""
     imported = result["imported"]
-    skipped_name = result["skipped_name"]
-    skipped_hash = result["skipped_hash"]
-    renamed = result["renamed"]
+    skipped_existing = result["skipped_existing"]
+    skipped_dup = result["skipped_duplicate_in_zip"]
     errors = result["errors"]
 
     lines = [f"✅ وارد شد: {len(imported)}"]
     if imported:
-        lines.append("  " + ", ".join(f"<code>{n}</code>" for n in imported[:8]))
+        for new_name, old_name in imported[:8]:
+            lines.append(f"  • <code>{new_name}</code> ← <code>{old_name}</code>")
         if len(imported) > 8:
             lines.append(f"  ... و {len(imported) - 8} تای دیگر")
 
-    if renamed:
-        lines.append(f"\n📝 تغییر نام: {len(renamed)}")
-        for old, new in renamed[:5]:
-            lines.append(f"  • {old} → {new}")
+    if skipped_existing:
+        lines.append(f"\n🆔 رد شد (session از قبل موجود): {len(skipped_existing)}")
+        for name, _ in skipped_existing[:5]:
+            lines.append(f"  • <code>{name}</code>")
 
-    if skipped_name:
-        lines.append(f"\n🔁 رد شد (اسم تکراری): {len(skipped_name)}")
-        for name, _ in skipped_name[:5]:
-            lines.append(f"  • {name}")
-
-    if skipped_hash:
-        lines.append(f"\n🆔 رد شد (اکانت تکراری): {len(skipped_hash)}")
-        for name, existing in skipped_hash[:5]:
-            lines.append(f"  • {name} (همان {existing})")
+    if skipped_dup:
+        lines.append(f"\n🔁 رد شد (تکراری داخل ZIP): {len(skipped_dup)}")
+        for name, first in skipped_dup[:5]:
+            lines.append(f"  • <code>{name}</code> (همان {first})")
 
     if errors:
         lines.append(f"\n⚠️ خطاها: {len(errors)}")
@@ -363,7 +322,6 @@ def _schedule_backup_upload():
     threading.Thread(target=_upload_backup_sync, daemon=True).start()
 
 def restore_mobin_from_telegram() -> bool:
-    """در استارت: دانلود و استخراج mobin_backup.zip از گروه."""
     chat_id = _mobin_ctx["backup_chat_id"]
     downloader = _mobin_ctx["backup_download"]
     if not chat_id or not downloader:
@@ -375,14 +333,13 @@ def restore_mobin_from_telegram() -> bool:
         with open(MOBIN_RESTORE_ZIP, "rb") as f:
             raw = f.read()
 
-        # از تابع anti-duplicate استفاده کن
-        result = import_sessions_zip(raw, on_conflict="skip")
+        result = import_sessions_zip(raw)
         if result["errors"]:
             mobin_logger.warning(f"restore mobin errors: {result['errors'][:5]}")
         mobin_logger.info(
             f"✅ mobin restored — imported={len(result['imported'])}, "
-            f"skipped_name={len(result['skipped_name'])}, "
-            f"skipped_hash={len(result['skipped_hash'])}"
+            f"skipped_existing={len(result['skipped_existing'])}, "
+            f"skipped_dup={len(result['skipped_duplicate_in_zip'])}"
         )
         return True
     except Exception as e:
@@ -535,7 +492,6 @@ async def mobin_cb(update: Update, context):
         await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return MOBIN_ROOT
 
-    # ---- بستن ----
     if data == "mobin_close":
         context.user_data.pop("mobin_authenticated", None)
         try:
@@ -545,7 +501,6 @@ async def mobin_cb(update: Update, context):
         await q.message.reply_text("پنل بسته شد.")
         return ConversationHandler.END
 
-    # ---- بازگشت ----
     if data == "mobin_back":
         await q.message.edit_text(
             "🎛 <b>پنل مبین</b>",
@@ -554,7 +509,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # ---- ری‌اکشن ----
     if data == "mobin_reaction":
         sessions = list_sessions()
         if not sessions:
@@ -572,24 +526,20 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_LINK
 
-    # ---- اضافه کردن سشن (ZIP) ----
     if data == "mobin_add_sessions":
         await q.message.reply_text(
             "📥 ZIP حاوی فایل‌های <code>.session</code> را ارسال کنید.\n\n"
-            "<b>ساختار ZIP:</b>\n"
-            "<pre>sessions.zip\n├── acc1.session\n├── acc2.session\n└── acc3.session</pre>\n"
-            "<b>محافظت‌ها:</b>\n"
-            "• session با اسم تکراری وارد نمی‌شود\n"
-            "• session با محتوای تکراری (همون اکانت) وارد نمی‌شود\n"
-            "• session تکراری داخل خود ZIP نادیده گرفته می‌شود\n\n"
-            "همه session ها باید با <b>API_ID و API_HASH</b> تنظیم‌شده در mobin.json ساخته شده باشند.\n"
+            "<b>نحوه کار:</b>\n"
+            "• اسم فایل‌های داخل ZIP مهم نیست\n"
+            "• خودش اسم می‌ده: <code>acc_0001</code>، <code>acc_0002</code>، ...\n"
+            "• اگه session تکراری (بر اساس محتوا) باشه، skip می‌شه\n"
+            "• هم با session‌های موجود چک می‌شه، هم داخل خود ZIP\n\n"
             f"مقدار فعلی: <code>API_ID={load_mobin_data().get('api_id')}</code>",
             parse_mode="HTML",
             reply_markup=_cancel_kb(),
         )
         return MOBIN_WAITING_ADD_SESSION_ZIP
 
-    # ---- لیست سشن‌ها ----
     if data == "mobin_sessions_list":
         names = list_sessions()
         if not names:
@@ -608,7 +558,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
-    # ---- حذف همه ----
     if data == "mobin_del_all_sessions":
         count = delete_all_sessions()
         _schedule_backup_upload()
@@ -620,7 +569,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # ---- حذف یک سشن ----
     if data.startswith("mobin_del_session_"):
         name = data[len("mobin_del_session_"):]
         if delete_session(name):
@@ -644,7 +592,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
-    # ---- دریافت بکاپ ----
     if data == "mobin_backup_get":
         raw = _build_backup_zip()
         await q.message.reply_document(
@@ -656,7 +603,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # ---- وارد کردن بکاپ ----
     if data == "mobin_backup_import":
         await q.message.reply_text(
             "📥 فایل ZIP بکاپ را ارسال کنید:",
@@ -664,7 +610,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_WAITING_IMPORT_ZIP
 
-    # ---- تغییر رمز ----
     if data == "mobin_change_password":
         await q.message.reply_text(
             "🔑 رمز جدید (حداقل ۳ کاراکتر):",
@@ -674,7 +619,7 @@ async def mobin_cb(update: Update, context):
 
     return MOBIN_ROOT
 
-# ---------- ری‌اکشن: ۳ گام ----------
+# ---------- ری‌اکشن ----------
 async def mobin_rx_link(update: Update, context):
     text = (update.message.text or "").strip()
     if text == "❌ لغو":
@@ -777,17 +722,14 @@ async def mobin_import_zip(update: Update, context):
     raw_bytes = bytes(raw)
 
     try:
-        # ۱) mobin.json را اول import کن
         with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
             if "mobin.json" in zf.namelist():
                 with open(MOBIN_DATA_FILE, "wb") as f:
                     f.write(zf.read("mobin.json"))
 
-        # ۲) session ها را با محافظت کامل import کن
-        result = import_sessions_zip(raw_bytes, on_conflict="skip")
+        result = import_sessions_zip(raw_bytes)
         _schedule_backup_upload()
         n = len(list_sessions())
-
         report = _format_import_report(result)
         await update.message.reply_text(
             f"✅ بکاپ پردازش شد — {n} سشن فعال.\n\n{report}",
@@ -812,10 +754,12 @@ async def mobin_add_sessions_zip(update: Update, context):
 
     status = await update.message.reply_text("⏳ در حال پردازش ZIP...")
 
-    # سیاست پیش‌فرض: skip تکراری‌ها
-    result = import_sessions_zip(raw_bytes, on_conflict="skip")
+    result = import_sessions_zip(raw_bytes)
 
-    if not result["imported"] and not result["skipped_name"] and not result["skipped_hash"] and not result["errors"]:
+    if (not result["imported"]
+            and not result["skipped_existing"]
+            and not result["skipped_duplicate_in_zip"]
+            and not result["errors"]):
         try:
             await status.edit_text(
                 "❌ هیچ فایل <code>.session</code> در ZIP پیدا نشد.",
