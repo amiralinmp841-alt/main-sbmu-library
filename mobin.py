@@ -61,8 +61,6 @@ _bg_tasks = {}
 # ---------- STATES ----------
 (
     MOBIN_ROOT,
-    MOBIN_WAITING_PASSWORD,
-    MOBIN_WAITING_NEW_PASSWORD,
     MOBIN_REACTION_WAITING_TARGET,
     MOBIN_REACTION_WAITING_EMOJI,
     MOBIN_REACTION_WAITING_ACCOUNTS,
@@ -73,7 +71,7 @@ _bg_tasks = {}
     MOBIN_REACTION_WAITING_EMOJI_CHOICE,
     MOBIN_REACTION_WAITING_MODE,
     MOBIN_REACTION_WAITING_DELAY,
-) = range(100, 113)
+) = range(100, 111)
 
 # ---------- GLOBAL CONTEXT ----------
 _mobin_ctx = {
@@ -573,7 +571,7 @@ async def _get_channel_reactions(
                         emojis.append(emoticon)
                 allowed_emojis = emojis
 
-        # --- دریافت ایموجی‌های فعال روی خود پیام (حتی اگر الان بسته باشند) ---
+        # دریافت ایموجی‌های موجود روی خود پیام (حتی اگر الان بسته شده باشد)
         target_mid = int(forward_info["message_id"]) if forward_info else int(msg_id or 0)
         post_emojis = []
         if target_mid > 0:
@@ -1047,12 +1045,11 @@ async def _background_delayed_runner(
 
     async def _run_delayed_single(session_name, emj, keep, delay_before):
         try:
-            # چک کردن کنسلی در زمان انتظار
             if delay_before > 0:
                 await asyncio.wait_for(cancel_event.wait(), timeout=delay_before)
                 return {"ok": False, "reason": "لغو شده توسط کاربر"}
         except asyncio.TimeoutError:
-            pass  # زمان انتظار به پایان رسید بدون کنسلی
+            pass
 
         if cancel_event.is_set():
             return {"ok": False, "reason": "لغو شده توسط کاربر"}
@@ -1127,7 +1124,6 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
         [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
         [InlineKeyboardButton("📥 وارد کردن بکاپ", callback_data="mobin_backup_import")],
-        [InlineKeyboardButton("🔑 تغییر رمز", callback_data="mobin_change_password")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="mobin_close")],
     ])
 
@@ -1197,14 +1193,6 @@ def _sessions_kb() -> InlineKeyboardMarkup:
 # =========================================================
 # HELPERS
 # =========================================================
-def _is_admin(user_id) -> bool:
-    return user_id in _mobin_ctx["admin_ids"]
-
-
-def _is_password_ok(text: str) -> bool:
-    return text.strip() == load_mobin_data().get("password", DEFAULT_PASSWORD)
-
-
 async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین</b>"):
     if update.callback_query and update.callback_query.message:
         try:
@@ -1220,11 +1208,9 @@ async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین
         )
 
 
-def _clear_mobin_user_data(context, keep_auth: bool = True):
+def _clear_mobin_user_data(context):
     for k in list(context.user_data.keys()):
         if k.startswith("mobin_"):
-            if keep_auth and k == "mobin_authenticated":
-                continue
             context.user_data.pop(k, None)
 
 
@@ -1232,35 +1218,40 @@ def _clear_mobin_user_data(context, keep_auth: bool = True):
 # HANDLERS
 # =========================================================
 async def mobin_cmd(update: Update, context):
-    user_id = update.effective_user.id
-    if _is_admin(user_id):
-        context.user_data["mobin_authenticated"] = True
-        await update.message.reply_text(
-            "🎛 <b>پنل مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
-        return MOBIN_ROOT
+    """
+    باز شدن مستقیم پنل برای تمامی کاربران بدون نیاز به پسورد
+    """
+    await update.message.reply_text(
+        "🎛 <b>پنل مدیریت ری‌اکشن مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
+        parse_mode="HTML",
+        reply_markup=_main_kb(),
+    )
+    return MOBIN_ROOT
+
+
+async def mobin_start_reset(update: Update, context):
+    """
+    ریست کردن کامل وضعیت پنل و گفتگو با زدن /start و بازگرداندن ربات به حالت عادی
+    """
+    ev = context.user_data.get("mobin_cancel_event")
+    if ev is not None:
+        ev.set()
+
+    # پاک کردن پیام پنل قبلی در صورت وجود برای تمیز ماندن چت
+    last_menu_msg_id = context.user_data.get("mobin_last_panel_msg_id")
+    if last_menu_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_menu_msg_id)
+        except Exception:
+            pass
+
+    _clear_mobin_user_data(context)
 
     await update.message.reply_text(
-        "🔐 این پنل خصوصی است. لطفاً رمز را وارد کنید:",
+        "👋 ربات به حالت عادی بازگشت.\nبرای باز کردن مجدد پنل دستور /mobin را ارسال کنید.",
         reply_markup=ReplyKeyboardRemove(),
     )
-    return MOBIN_WAITING_PASSWORD
-
-
-async def mobin_password(update: Update, context):
-    text = (update.message.text or "").strip()
-    if _is_password_ok(text):
-        context.user_data["mobin_authenticated"] = True
-        await update.message.reply_text(
-            "✅ رمز صحیح است.\n\n🎛 <b>پنل مبین</b>",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
-        return MOBIN_ROOT
-    await update.message.reply_text("❌ رمز اشتباه است. دوباره تلاش کنید یا /cancel.")
-    return MOBIN_WAITING_PASSWORD
+    return ConversationHandler.END
 
 
 async def mobin_mode_instant(update: Update, context):
@@ -1333,17 +1324,12 @@ async def mobin_cb(update: Update, context):
     q = update.callback_query
     await q.answer()
     data = q.data
-    user_id = q.from_user.id
-
-    if not (_is_admin(user_id) or context.user_data.get("mobin_authenticated")):
-        await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return MOBIN_ROOT
 
     if data == "mobin_cancel_action":
         ev = context.user_data.get("mobin_cancel_event")
         if ev is not None:
             ev.set()
-        _clear_mobin_user_data(context, keep_auth=True)
+        _clear_mobin_user_data(context)
         try:
             await q.message.delete()
         except Exception:
@@ -1389,13 +1375,12 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     if data == "mobin_close":
-        context.user_data.pop("mobin_authenticated", None)
-        _clear_mobin_user_data(context, keep_auth=False)
+        _clear_mobin_user_data(context)
         try:
             await q.message.delete()
         except Exception:
             pass
-        await q.message.reply_text("پنل بسته شد.")
+        await q.message.reply_text("پنل بسته شد. برای باز کردن دوباره دستور /mobin را بفرستید.")
         return ConversationHandler.END
 
     if data == "mobin_back":
@@ -1612,13 +1597,6 @@ async def mobin_cb(update: Update, context):
             reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_WAITING_IMPORT_ZIP
-
-    if data == "mobin_change_password":
-        await q.message.reply_text(
-            "🔑 رمز جدید (حداقل ۳ کاراکتر):",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_WAITING_NEW_PASSWORD
 
     return MOBIN_ROOT
 
@@ -1844,7 +1822,7 @@ async def mobin_rx_count(update: Update, context):
                 "ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد.",
                 reply_markup=_main_kb(),
             )
-            _clear_mobin_user_data(context, keep_auth=True)
+            _clear_mobin_user_data(context)
             return MOBIN_ROOT
 
         if remove_emoji != "__NOT_SET__" and remove_emoji is not None:
@@ -1859,7 +1837,7 @@ async def mobin_rx_count(update: Update, context):
                     f"ℹ️ هیچ سشنی ری‌اکشن {target_emoji} روی این پست ندارد.",
                     reply_markup=_main_kb(),
                 )
-                _clear_mobin_user_data(context, keep_auth=True)
+                _clear_mobin_user_data(context)
                 return MOBIN_ROOT
             selected = list(keep_map.keys())[:requested]
             keep_emojis_per_session = keep_map
@@ -1902,7 +1880,7 @@ async def mobin_rx_count(update: Update, context):
             "❌ سشنی برای اجرا پیدا نشد.",
             reply_markup=_main_kb(),
         )
-        _clear_mobin_user_data(context, keep_auth=True)
+        _clear_mobin_user_data(context)
         return MOBIN_ROOT
 
     actual_count = len(selected)
@@ -1968,7 +1946,7 @@ async def mobin_rx_count(update: Update, context):
             "count": actual_count,
         }
 
-        _clear_mobin_user_data(context, keep_auth=True)
+        _clear_mobin_user_data(context)
         return MOBIN_ROOT
 
     # ==========================================
@@ -2027,119 +2005,8 @@ async def mobin_rx_count(update: Update, context):
     except Exception:
         await update.message.reply_text(summary, parse_mode="HTML")
 
-    _clear_mobin_user_data(context, keep_auth=True)
+    _clear_mobin_user_data(context)
     await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
-    return MOBIN_ROOT
-
-
-# ---------- تغییر رمز ----------
-async def mobin_new_password(update: Update, context):
-    text = (update.message.text or "").strip()
-    if len(text) < 3:
-        await update.message.reply_text(
-            "❌ خیلی کوتاه است. حداقل ۳ کاراکتر:",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_WAITING_NEW_PASSWORD
-    data = load_mobin_data()
-    data["password"] = text
-    save_mobin_data(data, upload=True)
-    await update.message.reply_text(
-        "✅ رمز تغییر کرد و بکاپ آپلود شد.",
-        reply_markup=_main_kb(),
-    )
-    return MOBIN_ROOT
-
-
-# ---------- وارد کردن بکاپ ----------
-async def mobin_import_zip(update: Update, context):
-    doc = update.message.document
-    if not doc or not (doc.file_name or "").lower().endswith(".zip"):
-        await update.message.reply_text(
-            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_WAITING_IMPORT_ZIP
-
-    file = await doc.get_file()
-    raw = await file.download_as_bytearray()
-    raw_bytes = bytes(raw)
-
-    try:
-        with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
-            if "mobin.json" in zf.namelist():
-                with open(MOBIN_DATA_FILE, "wb") as f:
-                    f.write(zf.read("mobin.json"))
-
-        result = await import_sessions_zip(raw_bytes)
-        _schedule_backup_upload()
-        n = len(list_sessions())
-        report = _format_import_report(result)
-        await update.message.reply_text(
-            f"✅ بکاپ پردازش شد — {n} سشن فعال.\n\n{report}",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ خطا: {e}",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_WAITING_IMPORT_ZIP
-    return MOBIN_ROOT
-
-
-# ---------- اضافه کردن سشن‌ها با ZIP ----------
-async def mobin_add_sessions_zip(update: Update, context):
-    doc = update.message.document
-    if not doc or not (doc.file_name or "").lower().endswith(".zip"):
-        await update.message.reply_text(
-            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_WAITING_ADD_SESSION_ZIP
-
-    file = await doc.get_file()
-    raw = await file.download_as_bytearray()
-    raw_bytes = bytes(raw)
-
-    status = await update.message.reply_text("⏳ در حال پردازش ZIP...")
-
-    result = await import_sessions_zip(raw_bytes)
-
-    if (not result["imported"]
-            and not result["skipped_existing"]
-            and not result["skipped_duplicate_in_zip"]
-            and not result["errors"]):
-        try:
-            await status.edit_text(
-                "❌ هیچ فایل <code>.session</code> در ZIP پیدا نشد.",
-                parse_mode="HTML",
-                reply_markup=_main_kb(),
-            )
-        except Exception:
-            await update.message.reply_text(
-                "❌ هیچ فایل .session در ZIP پیدا نشد.",
-                reply_markup=_main_kb(),
-            )
-        return MOBIN_ROOT
-
-    _schedule_backup_upload()
-    total = len(list_sessions())
-    report = _format_import_report(result)
-
-    try:
-        await status.edit_text(
-            f"📊 مجموع: {total} سشن\n\n{report}",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
-    except Exception:
-        await update.message.reply_text(
-            f"📊 مجموع: {total} سشن\n\n{report}",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
     return MOBIN_ROOT
 
 
@@ -2147,8 +2014,8 @@ async def mobin_cancel(update: Update, context):
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
         ev.set()
-    _clear_mobin_user_data(context, keep_auth=True)
-    await update.message.reply_text("لغو شد.")
+    _clear_mobin_user_data(context)
+    await update.message.reply_text("لغو شد.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
@@ -2156,71 +2023,72 @@ async def mobin_cancel(update: Update, context):
 # CONVERSATION BUILDER
 # =========================================================
 def build_mobin_handler():
+    """
+    پیکربندی هندلر:
+    - با ارسال /mobin پنل بدون نیاز به رمز باز می‌شود.
+    - با ارسال /start در هر مرحله‌ای، پنل ریست شده و ربات کاملاً به حالت عادی برمی‌گردد.
+    """
+    start_cmd_handler = CommandHandler("start", mobin_start_reset)
+
     return ConversationHandler(
         entry_points=[CommandHandler("mobin", mobin_cmd)],
         states={
-            MOBIN_WAITING_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_password),
-            ],
             MOBIN_ROOT: [
+                start_cmd_handler,
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_SESSIONS_MANAGER: [
+                start_cmd_handler,
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_TARGET: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_rx_target),
+                start_cmd_handler,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_target),
                 MessageHandler(filters.FORWARDED, mobin_rx_target),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
+                start_cmd_handler,
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_MODE: [
+                start_cmd_handler,
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_DELAY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_delay_seconds),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                start_cmd_handler,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_delay_seconds),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_REMOVE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_remove_target),
+                start_cmd_handler,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI_CHOICE: [
+                start_cmd_handler,
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_rx_count),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
-            ],
-            MOBIN_WAITING_NEW_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               mobin_new_password),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                start_cmd_handler,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_IMPORT_ZIP: [
+                start_cmd_handler,
                 MessageHandler(filters.Document.ALL, mobin_import_zip),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_ADD_SESSION_ZIP: [
+                start_cmd_handler,
                 MessageHandler(filters.Document.ALL, mobin_add_sessions_zip),
-                CallbackQueryHandler(
-                    mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
         },
-        fallbacks=[CommandHandler("cancel", mobin_cancel)],
+        fallbacks=[
+            start_cmd_handler,
+            CommandHandler("cancel", mobin_cancel)
+        ],
         allow_reentry=True,
     )
