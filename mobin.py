@@ -68,7 +68,9 @@ _FALLBACK_EMOJIS = [
     MOBIN_SESSIONS_MANAGER,
     MOBIN_REACTION_WAITING_REMOVE,
     MOBIN_REACTION_WAITING_EMOJI_CHOICE,
-) = range(100, 111)
+    MOBIN_REACTION_WAITING_MODE,      # جدید
+    MOBIN_REACTION_WAITING_DELAY,     # جدید
+) = range(100, 113)
 
 # ---------- GLOBAL CONTEXT ----------
 _mobin_ctx = {
@@ -549,7 +551,6 @@ def _parse_target_from_text(text: str):
         last = parts[-1]
         if last.isdigit():
             msg_id = int(last)
-            # پشتیبانی از لینک‌های خصوصی t.me/c/ID/MSG_ID
             if len(parts) >= 3 and parts[-3] == "c":
                 try:
                     peer = int(f"-100{parts[-2]}")
@@ -587,10 +588,6 @@ def _extract_forward_info(message) -> dict | None:
 # CORE: read my reactions (raw)
 # =========================================================
 async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
-    """
-    ری‌اکشن‌های فعلی این کاربر روی پیام را برمی‌گرداند.
-    خروجی: (list[ReactionEmoji|ReactionCustomEmoji], bool_complete)
-    """
     try:
         msgs = await client.get_messages(entity, ids=[target_msg_id])
     except Exception as e:
@@ -603,12 +600,10 @@ async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
     msg_obj = msgs[0]
     reactions = getattr(msg_obj, "reactions", None)
     if not reactions:
-        # هیچ ری‌اکشنی روی این پست وجود ندارد
         return [], True
 
     my_reactions = []
 
-    # 1. روش استاندارد تلگرام: بررسی chosen_order / chosen روی نتایج پست
     results = getattr(reactions, "results", None) or []
     for rc in results:
         is_chosen = (
@@ -625,7 +620,6 @@ async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
         my_reactions.sort(key=lambda x: x[0])
         return [r[1] for r in my_reactions], True
 
-    # 2. بررسی تکمیلی recent_reactions (مخصوص سوپرگروه‌ها و چت‌های خصوصی)
     recent = getattr(reactions, "recent_reactions", None) or []
     for item in recent:
         peer_id = getattr(item, "peer_id", None)
@@ -641,12 +635,10 @@ async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
     if my_reactions:
         return [r[1] for r in my_reactions], True
 
-    # اگر به اینجا رسید، پیام ری‌اکشن دارد اما این اکانت هیچ ری‌اکشنی نزده است
     return [], True
 
 
 def _reaction_to_str(reaction) -> str | None:
-    """Reaction object → string (emoticon or custom:<id>)"""
     emoticon = getattr(reaction, "emoticon", None)
     if emoticon:
         return emoticon
@@ -657,7 +649,7 @@ def _reaction_to_str(reaction) -> str | None:
 
 
 # =========================================================
-# REACTION STATUS — has / none / unknown
+# REACTION STATUS
 # =========================================================
 async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=None):
     data = load_mobin_data()
@@ -678,7 +670,6 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "no me"}
         my_uid = int(me.id)
 
-        # parse entity & target_msg_id
         entity = None
         target_msg_id = 0
 
@@ -846,7 +837,6 @@ def _format_scan_report(scan: dict, is_remove: bool) -> str:
 # REACTION ACTION (single session)
 # =========================================================
 def _str_to_reaction_obj(e: str):
-    """string → Reaction object (Emoji یا Custom)"""
     if e.startswith("custom:"):
         try:
             doc_id = int(e[len("custom:"):])
@@ -864,12 +854,6 @@ async def _react_one_session(
     forward_info: dict | None = None,
     keep_emojis: list[str] | None = None,
 ) -> dict:
-    """
-    keep_emojis = None → رفتار عادی:
-        emoji=None   → پاک کردن همه ری‌اکشن‌ها
-        emoji="X"    → زدن X (جایگزینی)
-    keep_emojis = ["👍","❤️"] → فقط این‌ها را نگه دار و بقیه را حذف کن
-    """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
@@ -901,7 +885,6 @@ async def _react_one_session(
                     return {"ok": False, "reason": "no message"}
                 target_msg_id = msgs[0].id
 
-        # ساخت لیست ری‌اکشن نهایی
         reaction_list = []
 
         if keep_emojis is not None:
@@ -933,6 +916,34 @@ async def _react_one_session(
             await client.disconnect()
         except Exception:
             pass
+
+
+# =========================================================
+# DELAYED MODE HELPERS
+# =========================================================
+def _split_delays(total_seconds: float, n: int) -> list[float]:
+    """زمان کل را به n بازه نامساوی تقسیم می‌کند (cumulative).
+    خروجی: لیست تأخیر مطلق هر سشن نسبت به شروع اجرا.
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [round(total_seconds, 3)]
+
+    # توزیع نمایی برای طبیعی‌تر بودن (بعضی زود، بعضی دیر)
+    weights = [random.expovariate(1.0) for _ in range(n)]
+    total_w = sum(weights)
+    if total_w <= 0:
+        step = total_seconds / n
+        return [round(step * (i + 1), 3) for i in range(n)]
+
+    delays = []
+    acc = 0.0
+    for w in weights:
+        acc += (w / total_w) * total_seconds
+        delays.append(round(acc, 3))
+    delays[-1] = round(total_seconds, 3)
+    return delays
 
 
 # =========================================================
@@ -1006,6 +1017,16 @@ def _remove_emoji_kb(emoji_counts: dict[str, int]) -> InlineKeyboardMarkup:
     kb.append([InlineKeyboardButton(
         "❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
+
+
+def _mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ فوری (همین الان)",
+                              callback_data="mobin_mode_instant")],
+        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)",
+                              callback_data="mobin_mode_delayed")],
+        [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")],
+    ])
 
 
 def _sessions_kb() -> InlineKeyboardMarkup:
@@ -1090,6 +1111,72 @@ async def mobin_password(update: Update, context):
     return MOBIN_WAITING_PASSWORD
 
 
+async def mobin_mode_instant(update: Update, context):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["mobin_delay_mode"] = "instant"
+    context.user_data.pop("mobin_delay_seconds", None)
+    n = len(list_sessions())
+    await q.message.edit_text(
+        f"⚡ <b>حالت فوری</b>\n\n"
+        f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
+        f"<i>عدد را همینجا تایپ کنید.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+        ]),
+    )
+    return MOBIN_REACTION_WAITING_ACCOUNTS
+
+
+async def mobin_mode_delayed(update: Update, context):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["mobin_delay_mode"] = "delayed"
+    await q.message.edit_text(
+        "⏱ <b>حالت تاخیری</b>\n\n"
+        "کل زمان پخش را به <b>ثانیه</b> بفرستید (مثلاً <code>60</code>).\n"
+        "ربات این زمان را بین همه سشن‌های انتخاب‌شده به صورت نامساوی تقسیم می‌کند.\n\n"
+        "<i>مثال: ۶۰ ثانیه و ۵ سشن → هر سشن در یک لحظه متفاوت بین ۰ تا ۶۰ ثانیه ری‌اکشن می‌زند.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+        ]),
+    )
+    return MOBIN_REACTION_WAITING_DELAY
+
+
+async def mobin_delay_seconds(update: Update, context):
+    text = (update.message.text or "").strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ عدد معتبر بفرستید (مثلاً 60).",
+            reply_markup=_cancel_inline_kb(),
+        )
+        return MOBIN_REACTION_WAITING_DELAY
+    if seconds <= 0 or seconds > 3600 * 6:
+        await update.message.reply_text(
+            "❌ زمان باید بین ۱ ثانیه تا ۶ ساعت باشد.",
+            reply_markup=_cancel_inline_kb(),
+        )
+        return MOBIN_REACTION_WAITING_DELAY
+
+    context.user_data["mobin_delay_seconds"] = seconds
+    n = len(list_sessions())
+    await update.message.reply_text(
+        f"✅ زمان کل: <b>{seconds:g}</b> ثانیه\n\n"
+        f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
+        f"<i>عدد را همینجا تایپ کنید.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+        ]),
+    )
+    return MOBIN_REACTION_WAITING_ACCOUNTS
+
+
 async def mobin_cb(update: Update, context):
     q = update.callback_query
     await q.answer()
@@ -1128,6 +1215,12 @@ async def mobin_cb(update: Update, context):
     if data == "mobin_back":
         await _send_main_menu(update, context)
         return MOBIN_ROOT
+
+    if data == "mobin_mode_instant":
+        return await mobin_mode_instant(update, context)
+
+    if data == "mobin_mode_delayed":
+        return await mobin_mode_delayed(update, context)
 
     if data == "mobin_reaction":
         sessions = list_sessions()
@@ -1175,15 +1268,12 @@ async def mobin_cb(update: Update, context):
         n = len(list_sessions())
         await q.message.edit_text(
             f"🎭 ایموجی انتخابی: {emoji}\n\n"
-            f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
-            f"<i>عدد را همینجا تایپ کنید.</i>",
+            f"🔋 {n} سشن موجود\n\n"
+            f"<b>حالت اجرا را انتخاب کنید:</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "❌ لغو", callback_data="mobin_cancel_action")]
-            ]),
+            reply_markup=_mode_kb(),
         )
-        return MOBIN_REACTION_WAITING_ACCOUNTS
+        return MOBIN_REACTION_WAITING_MODE
 
     if data.startswith("mobin_rm_em_"):
         emoji = data[len("mobin_rm_em_"):]
@@ -1194,15 +1284,12 @@ async def mobin_cb(update: Update, context):
         n = len(list_sessions())
         await q.message.edit_text(
             f"🚫 حذف ری‌اکشن {emoji if emoji != 'ALL' else 'همه'}\n\n"
-            f"🔢 تعداد سشن‌ها برای اجرا (حداکثر {min(n, 10)}):\n"
-            f"<i>عدد را همینجا تایپ کنید.</i>",
+            f"🔋 {n} سشن موجود\n\n"
+            f"<b>حالت اجرا را انتخاب کنید:</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "❌ لغو", callback_data="mobin_cancel_action")]
-            ]),
+            reply_markup=_mode_kb(),
         )
-        return MOBIN_REACTION_WAITING_ACCOUNTS
+        return MOBIN_REACTION_WAITING_MODE
 
     if data == "mobin_add_sessions":
         await q.message.reply_text(
@@ -1520,6 +1607,8 @@ async def mobin_rx_count(update: Update, context):
     fwd_info = context.user_data.get("mobin_forward_info")
     scan = context.user_data.get("mobin_scan_result") or {}
     remove_emoji = context.user_data.get("mobin_remove_emoji", "__NOT_SET__")
+    delay_mode = context.user_data.get("mobin_delay_mode", "instant")
+    delay_seconds = float(context.user_data.get("mobin_delay_seconds", 0) or 0)
 
     is_remove = emoji is None
 
@@ -1599,6 +1688,94 @@ async def mobin_rx_count(update: Update, context):
         return MOBIN_ROOT
 
     actual_count = len(selected)
+
+    # ==========================================
+    # حالت تاخیری
+    # ==========================================
+    if delay_mode == "delayed" and delay_seconds > 0 and actual_count > 0:
+        tasks: list[tuple[str, str | None, list[str] | None]] = []
+        for s in selected:
+            if keep_emojis_per_session is not None:
+                tasks.append((s, None, keep_emojis_per_session.get(s, [])))
+            else:
+                tasks.append((s, emoji_to_send, None))
+
+        delays = _split_delays(delay_seconds, actual_count)
+        scheduled = list(zip(tasks, delays))
+        random.shuffle(scheduled)
+
+        status_msg = await update.message.reply_text(
+            f"🚀 <b>حالت تاخیری</b>\n"
+            f"📊 {actual_count} سشن در <b>{delay_seconds:g}</b> ثانیه پخش می‌شوند...",
+            parse_mode="HTML",
+        )
+
+        async def _run_one(session_name, emj, keep, delay_before):
+            if delay_before > 0:
+                await asyncio.sleep(delay_before)
+            if keep is not None:
+                return await _react_one_session(
+                    session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
+                )
+            return await _react_one_session(
+                session_name, peer, msg_id, emj, fwd_info
+            )
+
+        start_time = time.time()
+        coros = []
+        for (s, emj, keep), delay_at in scheduled:
+            coros.append(_run_one(s, emj, keep, delay_at))
+
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        ok_total = 0
+        failed = []
+        for ((s, emj, keep), _d), r in zip(scheduled, results):
+            if isinstance(r, dict) and r.get("ok"):
+                ok_total += 1
+            else:
+                reason = r.get("reason") if isinstance(r, dict) else str(r)
+                failed.append(f"• <code>{s}</code>: {reason}")
+
+        elapsed = time.time() - start_time
+
+        lines = [f"✅ موفق: {ok_total}/{actual_count}"]
+        lines.append(
+            f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})"
+        )
+
+        if is_remove:
+            lines.append(f"\n🗑 عملیات: {action_label}")
+        else:
+            lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
+            if used_no_reaction:
+                lines.append(f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
+            if used_unknown:
+                lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
+            if used_with_reaction:
+                lines.append(
+                    f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
+            if used_unknown or used_with_reaction:
+                lines.append(
+                    "\n<i>⚠️ چون تعداد سشن آزاد کافی نبود، از سشن‌های دیگر هم استفاده شد.</i>"
+                )
+
+        if failed:
+            lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
+            lines.extend(failed[:10])
+
+        summary = "\n".join(lines)
+        try:
+            await status_msg.edit_text(summary, parse_mode="HTML")
+        except Exception:
+            await update.message.reply_text(summary, parse_mode="HTML")
+
+        _clear_mobin_user_data(context, keep_auth=True)
+        await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
+        return MOBIN_ROOT
+
+    # ==========================================
+    # حالت فوری
+    # ==========================================
     status_msg = await update.message.reply_text(
         f"🚀 در حال اجرا ({action_label}) روی {actual_count} سشن..."
     )
@@ -1809,6 +1986,15 @@ def build_mobin_handler():
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
+            ],
+            MOBIN_REACTION_WAITING_MODE: [
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
+            ],
+            MOBIN_REACTION_WAITING_DELAY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_delay_seconds),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_REMOVE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
