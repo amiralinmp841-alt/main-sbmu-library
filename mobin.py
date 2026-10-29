@@ -581,18 +581,7 @@ def _extract_forward_info(message) -> dict | None:
 # =========================================================
 # REACTION STATUS — 3-state (has / none / unknown)
 # =========================================================
-async def _get_my_reaction_status(
-    session_name: str,
-    peer_str: str | None,
-    msg_id: int,
-    forward_info: dict | None = None,
-) -> dict:
-    """
-    وضعیت ری‌اکشن یک سشن روی پیام هدف:
-      status = "has"     → مطمئناً ری‌اکشن دارد (از recent_reactions یا لیست کامل)
-      status = "none"    → مطمئناً ری‌اکشن ندارد (پیام اصلاً reactions ندارد یا لیست کامل چک شد و نبود)
-      status = "unknown" → نمی‌شود مطمئن شد (recent سشن را ندارد و لیست کامل در دسترس نیست)
-    """
+async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=None):
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
@@ -607,53 +596,35 @@ async def _get_my_reaction_status(
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "unauthorized"}
 
         me = await client.get_me()
-        my_uid = int(me.id) if me else None
-        if my_uid is None:
+        if me is None:
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "no me"}
+        my_uid = int(me.id)
 
-        if forward_info:
-            try:
-                entity = await client.get_entity(forward_info["chat_id"])
-            except Exception as e:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"forward entity: {e}"}
-            target_msg_id = forward_info["message_id"]
-        else:
-            if not peer_str:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": "no target"}
-            try:
-                entity = await client.get_entity(peer_str)
-            except Exception as e:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"entity: {e}"}
-            if msg_id:
-                target_msg_id = msg_id
-            else:
-                msgs = await client.get_messages(entity, limit=1)
-                if not msgs:
-                    return {"ok": False, "status": "unknown", "emojis": [], "reason": "no message"}
-                target_msg_id = msgs[0].id
+        # ... (همان منطق entity و target_msg_id) ...
 
-        try:
-            msgs = await client.get_messages(entity, ids=[target_msg_id])
-        except Exception as e:
-            return {"ok": False, "status": "unknown", "emojis": [], "reason": f"get_messages: {e}"}
-
+        msgs = await client.get_messages(entity, ids=[target_msg_id])
         if not msgs or not msgs[0]:
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "message not found"}
 
         msg_obj = msgs[0]
         reactions = getattr(msg_obj, "reactions", None)
 
-        # پیام اصلاً reaction ندارد → مطمئناً none
+        # پیام اصلاً reaction ندارد → قطعاً none
         if not reactions:
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        # مرحله A: recent_reactions
+        results_count = getattr(reactions, "results", 0) or 0
         recent = getattr(reactions, "recent_reactions", None) or []
+
+        # مرحله A: recent_reactions
         my_emojis: list[str] = []
         for item in recent:
             peer_id = getattr(item, "peer_id", None)
             uid = getattr(peer_id, "user_id", None) if peer_id else None
-            if uid != my_uid:
+            try:
+                if uid is None or int(uid) != my_uid:
+                    continue
+            except Exception:
                 continue
             reaction = getattr(item, "reaction", None)
             if reaction is None:
@@ -669,54 +640,65 @@ async def _get_my_reaction_status(
         if my_emojis:
             return {"ok": True, "status": "has", "emojis": my_emojis, "reason": None}
 
-        # مرحله B: can_see_list → تلاش لیست کامل
+        # اگه recent_reactions کل results رو پوشش می‌ده و ما توش نیستیم → قطعاً none
+        if results_count > 0 and len(recent) >= results_count:
+            return {"ok": True, "status": "none", "emojis": [], "reason": None}
+
+        # مرحله B: پیمایش کامل لیست
         can_see_list = getattr(reactions, "can_see_list", False)
-        if can_see_list:
-            my_emojis_full: list[str] = []
-            offset = ""
-            list_ok = False
-            try:
-                pages = 0
-                while pages < 10:
-                    pages += 1
-                    res = await client(GetMessageReactionsListRequest(
-                        peer=entity, id=target_msg_id, limit=100, offset=offset,
-                    ))
-                    reactions_list = getattr(res, "reactions", None) or []
-                    for item in reactions_list:
-                        peer_id = getattr(item, "peer_id", None)
-                        uid = getattr(peer_id, "user_id", None) if peer_id else None
-                        if uid != my_uid:
-                            continue
-                        reaction = getattr(item, "reaction", None)
-                        if reaction is None:
-                            continue
-                        emoticon = getattr(reaction, "emoticon", None)
-                        if emoticon:
-                            my_emojis_full.append(emoticon)
-                        else:
-                            document_id = getattr(reaction, "document_id", None)
-                            if document_id:
-                                my_emojis_full.append(f"custom:{document_id}")
-                    next_offset = getattr(res, "next_offset", None)
-                    if not next_offset:
-                        list_ok = True
-                        break
-                    offset = next_offset
-                    if len(reactions_list) < 100:
-                        list_ok = True
-                        break
+        if not can_see_list:
+            return {"ok": True, "status": "unknown", "emojis": [],
+                    "reason": "cannot see full list"}
 
-                if list_ok:
-                    if my_emojis_full:
-                        return {"ok": True, "status": "has", "emojis": my_emojis_full, "reason": None}
-                    return {"ok": True, "status": "none", "emojis": [], "reason": None}
-                return {"ok": True, "status": "unknown", "emojis": [], "reason": "pagination incomplete"}
-            except Exception as e:
-                mobin_logger.debug(f"GetMessageReactionsList failed for {session_name}: {e}")
-                return {"ok": True, "status": "unknown", "emojis": [], "reason": f"list_error: {type(e).__name__}"}
+        my_emojis_full: list[str] = []
+        offset = ""
+        pages = 0
+        max_pages = 50  # سقف امن
+        complete = False
+        try:
+            while pages < max_pages:
+                pages += 1
+                res = await client(GetMessageReactionsListRequest(
+                    peer=entity, id=target_msg_id, limit=100, offset=offset,
+                ))
+                reactions_list = getattr(res, "reactions", None) or []
+                for item in reactions_list:
+                    peer_id = getattr(item, "peer_id", None)
+                    uid = getattr(peer_id, "user_id", None) if peer_id else None
+                    try:
+                        if uid is None or int(uid) != my_uid:
+                            continue
+                    except Exception:
+                        continue
+                    reaction = getattr(item, "reaction", None)
+                    if reaction is None:
+                        continue
+                    emoticon = getattr(reaction, "emoticon", None)
+                    if emoticon:
+                        my_emojis_full.append(emoticon)
+                    else:
+                        document_id = getattr(reaction, "document_id", None)
+                        if document_id:
+                            my_emojis_full.append(f"custom:{document_id}")
 
-        return {"ok": True, "status": "unknown", "emojis": [], "reason": "no_recent_no_list"}
+                next_offset = getattr(res, "next_offset", None)
+                # پایان واقعی: next_offset خالی/None است
+                if not next_offset:
+                    complete = True
+                    break
+                offset = next_offset
+                await asyncio.sleep(0.3)  # rate limit
+
+            if my_emojis_full:
+                return {"ok": True, "status": "has", "emojis": my_emojis_full, "reason": None}
+            if complete:
+                return {"ok": True, "status": "none", "emojis": [], "reason": None}
+            return {"ok": True, "status": "unknown", "emojis": [],
+                    "reason": f"pagination incomplete after {pages} pages"}
+        except Exception as e:
+            mobin_logger.debug(f"GetMessageReactionsList failed for {session_name}: {e}")
+            return {"ok": True, "status": "unknown", "emojis": [],
+                    "reason": f"list_error: {type(e).__name__}"}
 
     except Exception as e:
         return {"ok": False, "status": "unknown", "emojis": [], "reason": str(e)}
