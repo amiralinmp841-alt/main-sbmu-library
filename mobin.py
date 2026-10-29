@@ -30,7 +30,7 @@ from telegram.ext import (
 
 from telethon import TelegramClient, functions
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji, AvailableReactions
+from telethon.tl.types import ReactionEmoji
 
 mobin_logger = logging.getLogger("mobin")
 mobin_logger.setLevel(logging.INFO)
@@ -48,6 +48,13 @@ _reactions_cache = {
     "fetched_at": 0,
     "ttl": 12 * 60 * 60,
 }
+
+# لیست پیش‌فرض امن (اگه دریافت از تلگرام شکست خورد)
+_FALLBACK_EMOJIS = [
+    "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔",
+    "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩",
+    "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳",
+]
 
 # ---------- STATES ----------
 (
@@ -337,8 +344,7 @@ async def _get_available_reactions() -> list[str]:
 
     sessions = list_sessions()
     if not sessions:
-        # اگر هیچ session نداری، لیست پیش‌فرض امن
-        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+        return list(_FALLBACK_EMOJIS)
 
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
@@ -349,23 +355,31 @@ async def _get_available_reactions() -> list[str]:
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+            return list(_FALLBACK_EMOJIS)
 
+        # ✅ بدون import مستقیم AvailableReactions
         result = await client(functions.messages.GetAvailableReactionsRequest(hash=0))
-        if isinstance(result, AvailableReactions):
-            emojis = []
-            for r in result.reactions:
-                if hasattr(r, "reaction") and hasattr(r.reaction, "emoticon"):
-                    emojis.append(r.reaction.emoticon)
-            if emojis:
-                _reactions_cache["list"] = emojis
-                _reactions_cache["fetched_at"] = now
-                mobin_logger.info(f"Fetched {len(emojis)} available reactions")
-                return emojis
-        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+        emojis: list[str] = []
+        # نتیجه دارای فیلد reactions است
+        reactions_attr = getattr(result, "reactions", None)
+        if reactions_attr:
+            for r in reactions_attr:
+                react = getattr(r, "reaction", None)
+                if react is not None:
+                    emoticon = getattr(react, "emoticon", None)
+                    if emoticon:
+                        emojis.append(emoticon)
+
+        if emojis:
+            _reactions_cache["list"] = emojis
+            _reactions_cache["fetched_at"] = now
+            mobin_logger.info(f"Fetched {len(emojis)} available reactions")
+            return emojis
+
+        return list(_FALLBACK_EMOJIS)
     except Exception as e:
         mobin_logger.error(f"get_available_reactions failed: {e}")
-        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+        return list(_FALLBACK_EMOJIS)
     finally:
         try:
             await client.disconnect()
