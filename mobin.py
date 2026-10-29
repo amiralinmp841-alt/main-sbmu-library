@@ -600,7 +600,31 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "no me"}
         my_uid = int(me.id)
 
-        # ... (همان منطق entity و target_msg_id) ...
+        # ===== 关键修复：完整解析 entity 和 target_msg_id =====
+        entity = None
+        target_msg_id = 0
+
+        if forward_info:
+            try:
+                entity = await client.get_entity(forward_info["chat_id"])
+                target_msg_id = int(forward_info["message_id"])
+            except Exception as e:
+                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"forward entity: {e}"}
+        else:
+            if not peer_str:
+                return {"ok": False, "status": "unknown", "emojis": [], "reason": "no target"}
+            try:
+                entity = await client.get_entity(peer_str)
+            except Exception as e:
+                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"entity: {e}"}
+            if msg_id:
+                target_msg_id = int(msg_id)
+            else:
+                # 如果没有指定 msg_id，获取最后一条消息
+                msgs = await client.get_messages(entity, limit=1)
+                if not msgs:
+                    return {"ok": False, "status": "unknown", "emojis": [], "reason": "no message"}
+                target_msg_id = msgs[0].id
 
         msgs = await client.get_messages(entity, ids=[target_msg_id])
         if not msgs or not msgs[0]:
@@ -609,14 +633,14 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
         msg_obj = msgs[0]
         reactions = getattr(msg_obj, "reactions", None)
 
-        # پیام اصلاً reaction ندارد → قطعاً none
+        # 消息本身没有任何 reaction → 确定 none
         if not reactions:
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
         results_count = getattr(reactions, "results", 0) or 0
         recent = getattr(reactions, "recent_reactions", None) or []
 
-        # مرحله A: recent_reactions
+        # 阶段 A：检查 recent_reactions
         my_emojis: list[str] = []
         for item in recent:
             peer_id = getattr(item, "peer_id", None)
@@ -640,20 +664,21 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
         if my_emojis:
             return {"ok": True, "status": "has", "emojis": my_emojis, "reason": None}
 
-        # اگه recent_reactions کل results رو پوشش می‌ده و ما توش نیستیم → قطعاً none
+        # 如果 recent_reactions 已经覆盖了全部 results，且用户不在其中 → 确定 none
         if results_count > 0 and len(recent) >= results_count:
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        # مرحله B: پیمایش کامل لیست
+        # 阶段 B：遍历完整列表
         can_see_list = getattr(reactions, "can_see_list", False)
         if not can_see_list:
+            # 无法查看完整列表，无法确定用户是否 reaction
             return {"ok": True, "status": "unknown", "emojis": [],
                     "reason": "cannot see full list"}
 
         my_emojis_full: list[str] = []
         offset = ""
         pages = 0
-        max_pages = 50  # سقف امن
+        max_pages = 50
         complete = False
         try:
             while pages < max_pages:
@@ -682,12 +707,11 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
                             my_emojis_full.append(f"custom:{document_id}")
 
                 next_offset = getattr(res, "next_offset", None)
-                # پایان واقعی: next_offset خالی/None است
                 if not next_offset:
                     complete = True
                     break
                 offset = next_offset
-                await asyncio.sleep(0.3)  # rate limit
+                await asyncio.sleep(0.3)
 
             if my_emojis_full:
                 return {"ok": True, "status": "has", "emojis": my_emojis_full, "reason": None}
