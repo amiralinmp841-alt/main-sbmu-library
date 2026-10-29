@@ -29,7 +29,7 @@ from telegram.ext import (
 
 from telethon import TelegramClient, functions
 from telethon.tl.functions.messages import SendReactionRequest, GetMessageReactionsListRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
 
 mobin_logger = logging.getLogger("mobin")
 mobin_logger.setLevel(logging.INFO)
@@ -365,10 +365,7 @@ def _build_backup_zip() -> bytes:
         if os.path.isdir(MOBIN_SESSIONS_DIR):
             for name in os.listdir(MOBIN_SESSIONS_DIR):
                 if name.endswith(".session"):
-                    zf.write(
-                        os.path.join(MOBIN_SESSIONS_DIR, name),
-                        f"sessions/{name}",
-                    )
+                    zf.write(os.path.join(MOBIN_SESSIONS_DIR, name), f"sessions/{name}")
     return buf.getvalue()
 
 
@@ -600,7 +597,7 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
             return {"ok": False, "status": "unknown", "emojis": [], "reason": "no me"}
         my_uid = int(me.id)
 
-        # ===== 关键修复：完整解析 entity 和 target_msg_id =====
+        # ===== parse entity & target_msg_id =====
         entity = None
         target_msg_id = 0
 
@@ -620,7 +617,6 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
             if msg_id:
                 target_msg_id = int(msg_id)
             else:
-                # 如果没有指定 msg_id，获取最后一条消息
                 msgs = await client.get_messages(entity, limit=1)
                 if not msgs:
                     return {"ok": False, "status": "unknown", "emojis": [], "reason": "no message"}
@@ -633,15 +629,12 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
         msg_obj = msgs[0]
         reactions = getattr(msg_obj, "reactions", None)
 
-        # 消息本身没有任何 reaction → 确定 none
+        # پیام اصلاً ری‌اکشن ندارد → قطعاً none
         if not reactions:
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        results_count = getattr(reactions, "results", 0) or 0
+        # ===== مرحله ۱: بررسی سریع recent_reactions (فقط برای تشخیص "دارد") =====
         recent = getattr(reactions, "recent_reactions", None) or []
-
-        # 阶段 A：检查 recent_reactions
-        my_emojis: list[str] = []
         for item in recent:
             peer_id = getattr(item, "peer_id", None)
             uid = getattr(peer_id, "user_id", None) if peer_id else None
@@ -655,37 +648,59 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
                 continue
             emoticon = getattr(reaction, "emoticon", None)
             if emoticon:
-                my_emojis.append(emoticon)
-            else:
-                document_id = getattr(reaction, "document_id", None)
-                if document_id:
-                    my_emojis.append(f"custom:{document_id}")
+                return {"ok": True, "status": "has", "emojis": [emoticon], "reason": None}
+            document_id = getattr(reaction, "document_id", None)
+            if document_id:
+                return {"ok": True, "status": "has", "emojis": [f"custom:{document_id}"], "reason": None}
 
-        if my_emojis:
-            return {"ok": True, "status": "has", "emojis": my_emojis, "reason": None}
-
-        # 如果 recent_reactions 已经覆盖了全部 results，且用户不在其中 → 确定 none
-        if results_count > 0 and len(recent) >= results_count:
+        # ===== مرحله ۲: لیست کامل — به ازای هر ایموجی جداگانه با فیلتر reaction =====
+        results = getattr(reactions, "results", None) or []
+        if not results:
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        # 阶段 B：遍历完整列表
         can_see_list = getattr(reactions, "can_see_list", False)
-        if not can_see_list:
-            # 无法查看完整列表，无法确定用户是否 reaction
-            return {"ok": True, "status": "unknown", "emojis": [],
-                    "reason": "cannot see full list"}
 
-        my_emojis_full: list[str] = []
-        offset = ""
-        pages = 0
-        max_pages = 50
-        complete = False
-        try:
+        my_emojis_found: list[str] = []
+        any_checked = False
+
+        for result_item in results:
+            reaction_obj = getattr(result_item, "reaction", None)
+            if reaction_obj is None:
+                continue
+
+            emoticon = getattr(reaction_obj, "emoticon", None)
+            document_id = getattr(reaction_obj, "document_id", None)
+
+            if emoticon:
+                filter_reaction = ReactionEmoji(emoticon=emoticon)
+            elif document_id:
+                filter_reaction = ReactionCustomEmoji(document_id=document_id)
+            else:
+                continue
+
+            offset = ""
+            pages = 0
+            max_pages = 20
+            found_this = False
+            check_complete = False
+
             while pages < max_pages:
                 pages += 1
-                res = await client(GetMessageReactionsListRequest(
-                    peer=entity, id=target_msg_id, limit=100, offset=offset,
-                ))
+                try:
+                    res = await client(GetMessageReactionsListRequest(
+                        peer=entity,
+                        id=target_msg_id,
+                        reaction=filter_reaction,  # ← فیلتر بر اساس ایموجی
+                        limit=100,
+                        offset=offset,
+                    ))
+                except Exception as e:
+                    mobin_logger.debug(
+                        f"GetMessageReactionsList failed for {session_name} "
+                        f"emoji {emoticon or document_id}: {e}"
+                    )
+                    break
+
                 reactions_list = getattr(res, "reactions", None) or []
                 for item in reactions_list:
                     peer_id = getattr(item, "peer_id", None)
@@ -695,34 +710,39 @@ async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=N
                             continue
                     except Exception:
                         continue
-                    reaction = getattr(item, "reaction", None)
-                    if reaction is None:
-                        continue
-                    emoticon = getattr(reaction, "emoticon", None)
-                    if emoticon:
-                        my_emojis_full.append(emoticon)
-                    else:
-                        document_id = getattr(reaction, "document_id", None)
-                        if document_id:
-                            my_emojis_full.append(f"custom:{document_id}")
+                    found_this = True
+                    break
+
+                if found_this:
+                    check_complete = True
+                    break
 
                 next_offset = getattr(res, "next_offset", None)
                 if not next_offset:
-                    complete = True
+                    check_complete = True
                     break
                 offset = next_offset
                 await asyncio.sleep(0.3)
 
-            if my_emojis_full:
-                return {"ok": True, "status": "has", "emojis": my_emojis_full, "reason": None}
-            if complete:
-                return {"ok": True, "status": "none", "emojis": [], "reason": None}
+            if found_this:
+                any_checked = True
+                if emoticon:
+                    my_emojis_found.append(emoticon)
+                elif document_id:
+                    my_emojis_found.append(f"custom:{document_id}")
+            elif check_complete:
+                any_checked = True
+
+        if my_emojis_found:
+            return {"ok": True, "status": "has", "emojis": my_emojis_found, "reason": None}
+        if any_checked:
+            return {"ok": True, "status": "none", "emojis": [], "reason": None}
+
+        if not can_see_list:
             return {"ok": True, "status": "unknown", "emojis": [],
-                    "reason": f"pagination incomplete after {pages} pages"}
-        except Exception as e:
-            mobin_logger.debug(f"GetMessageReactionsList failed for {session_name}: {e}")
-            return {"ok": True, "status": "unknown", "emojis": [],
-                    "reason": f"list_error: {type(e).__name__}"}
+                    "reason": "cannot see full list"}
+        return {"ok": True, "status": "unknown", "emojis": [],
+                "reason": "no emoji list could be fetched"}
 
     except Exception as e:
         return {"ok": False, "status": "unknown", "emojis": [], "reason": str(e)}
@@ -853,13 +873,6 @@ async def _react_one_session(
     forward_info: dict | None = None,
     keep_emojis: list[str] | None = None,
 ) -> dict:
-    """
-    keep_emojis = None → رفتار عادی:
-        emoji=None   → پاک کردن همه ری‌اکشن‌ها
-        emoji="X"    → زدن X (جایگزینی)
-    keep_emojis = ["👍","❤️"] → فقط این‌ها را نگه دار و بقیه را حذف کن
-        (برای حذف تک‌ایموجی: ایموجی هدف از keep_emojis حذف شده)
-    """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
@@ -891,9 +904,18 @@ async def _react_one_session(
                     return {"ok": False, "reason": "no message"}
                 target_msg_id = msgs[0].id
 
+        # ===== ساخت لیست ری‌اکشن با پشتیبانی از custom emoji =====
         if keep_emojis is not None:
-            # فقط ایموجی‌های keep_emojis را نگه دار
-            reaction_list = [ReactionEmoji(emoticon=e) for e in keep_emojis if not e.startswith("custom:")]
+            reaction_list = []
+            for e in keep_emojis:
+                if e.startswith("custom:"):
+                    try:
+                        doc_id = int(e[len("custom:"):])
+                        reaction_list.append(ReactionCustomEmoji(document_id=doc_id))
+                    except (ValueError, TypeError):
+                        continue
+                else:
+                    reaction_list.append(ReactionEmoji(emoticon=e))
         elif not emoji:
             reaction_list = []
         else:
@@ -1015,7 +1037,6 @@ async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین
 
 
 def _clear_mobin_user_data(context, keep_auth: bool = True):
-    """پاک کردن داده‌های موقت mobin، ولی احراز هویت را نگه می‌دارد."""
     for k in list(context.user_data.keys()):
         if k.startswith("mobin_"):
             if keep_auth and k == "mobin_authenticated":
@@ -1068,7 +1089,6 @@ async def mobin_cb(update: Update, context):
         await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return MOBIN_ROOT
 
-    # لغو سراسری
     if data == "mobin_cancel_action":
         ev = context.user_data.get("mobin_cancel_event")
         if ev is not None:
@@ -1464,7 +1484,6 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
 
 
 # ---------- اجرا ----------
-# ---------- اجرا ----------
 async def mobin_rx_count(update: Update, context):
     text = (update.message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
@@ -1490,7 +1509,6 @@ async def mobin_rx_count(update: Update, context):
     keep_emojis_per_session: dict[str, list[str]] | None = None
     emoji_to_send: str | None = emoji
 
-    # ===== شمارنده‌ها برای گزارش =====
     used_no_reaction = 0
     used_unknown = 0
     used_with_reaction = 0
@@ -1530,26 +1548,22 @@ async def mobin_rx_count(update: Update, context):
             action_label = "حذف همه ری‌اکشن‌ها"
             used_with_reaction = len(selected)
     else:
-        # ===== حالت زدن ری‌اکشن — اولویت‌بندی هوشمند =====
         no_reaction_list = list(scan.get("no_reaction", []))
         unknown_list = [s for s, _ in scan.get("unknown", [])]
         with_reaction_list = [s for s, _ in scan.get("with_reaction", [])]
 
         selected: list[str] = []
 
-        # اولویت ۱: سشن‌های آزاد تأییدشده
         take = no_reaction_list[:requested]
         selected.extend(take)
         used_no_reaction = len(take)
 
-        # اولویت ۲: اگر کم آمد، از unknown
         if len(selected) < requested:
             need = requested - len(selected)
             take = unknown_list[:need]
             selected.extend(take)
             used_unknown = len(take)
 
-        # اولویت ۳: اگر باز هم کم آمد، از with_reaction (جایگزینی می‌شود، ری‌اکشن تکراری نمی‌شود)
         if len(selected) < requested:
             need = requested - len(selected)
             take = with_reaction_list[:need]
@@ -1596,7 +1610,6 @@ async def mobin_rx_count(update: Update, context):
         if i + MAX_PARALLEL_ACTIONS < len(selected):
             await asyncio.sleep(random.uniform(3, 7))
 
-    # ===== گزارش نهایی =====
     lines = [f"✅ موفق: {ok_total}/{actual_count}"]
 
     if is_remove:
@@ -1610,7 +1623,6 @@ async def mobin_rx_count(update: Update, context):
         if used_with_reaction:
             lines.append(f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
 
-        # هشدار در صورت استفاده از fallback
         if used_unknown or used_with_reaction:
             lines.append(
                 "\n<i>⚠️ چون تعداد سشن آزاد کافی نبود، از سشن‌های دیگر هم استفاده شد. "
@@ -1630,6 +1642,7 @@ async def mobin_rx_count(update: Update, context):
     _clear_mobin_user_data(context, keep_auth=True)
     await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
     return MOBIN_ROOT
+
 
 # ---------- تغییر رمز ----------
 async def mobin_new_password(update: Update, context):
