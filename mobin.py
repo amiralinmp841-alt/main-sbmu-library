@@ -42,7 +42,7 @@ MOBIN_BACKUP_ZIP = "/tmp/mobin_backup.zip"
 MOBIN_RESTORE_ZIP = "/tmp/mobin_restore.zip"
 DEFAULT_PASSWORD = "من مبینم"
 
-# کش برای ری‌اکشن‌های سراسری
+# کش برای ری‌اکشن‌های سراسری (پشتیبان)
 _reactions_cache = {
     "list": None,
     "fetched_at": 0,
