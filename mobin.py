@@ -10,6 +10,7 @@ import html
 import random
 import time
 import concurrent.futures
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -41,15 +42,14 @@ MOBIN_SESSIONS_DIR = "/tmp/mobin_sessions"
 MOBIN_BACKUP_ZIP = "/tmp/mobin_backup.zip"
 MOBIN_RESTORE_ZIP = "/tmp/mobin_restore.zip"
 DEFAULT_PASSWORD = "من مبینم"
+MAX_PARALLEL_CHECKS = 5  # تعداد سشن‌های همزمان برای چک اولیه
 
-# کش برای ری‌اکشن‌های سراسری (پشتیبان)
 _reactions_cache = {
     "list": None,
     "fetched_at": 0,
     "ttl": 12 * 60 * 60,
 }
 
-# لیست پیش‌فرض امن — فقط زمانی استفاده می‌شه که هیچ سشنی موجود نباشه
 _FALLBACK_EMOJIS = [
     "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔",
     "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩",
@@ -68,7 +68,8 @@ _FALLBACK_EMOJIS = [
     MOBIN_WAITING_ADD_SESSION_ZIP,
     MOBIN_SESSIONS_MANAGER,
     MOBIN_REACTION_WAITING_REMOVE,
-) = range(100, 110)
+    MOBIN_REACTION_WAITING_EMOJI_CHOICE,   # جدید: انتخاب ایموجی برای برداشتن
+) = range(100, 111)
 
 # ---------- GLOBAL CONTEXT ----------
 _mobin_ctx = {
@@ -409,7 +410,7 @@ def restore_mobin_from_telegram() -> bool:
         return False
 
 # =========================================================
-# AVAILABLE REACTIONS (per-channel) — فقط مجازهای همان کانال
+# AVAILABLE REACTIONS (per-channel)
 # =========================================================
 async def _get_channel_reactions(
     peer_str: str | None = None,
@@ -559,7 +560,7 @@ def _extract_forward_info(message) -> dict | None:
     return None
 
 # =========================================================
-# REACTION CHECK (does this session already have a reaction?)
+# SCAN ALL SESSIONS FOR REACTION STATUS
 # =========================================================
 async def _get_my_reaction_status(
     session_name: str,
@@ -568,11 +569,8 @@ async def _get_my_reaction_status(
     forward_info: dict | None = None,
 ) -> dict:
     """
-    بررسی می‌کند که آیا این سشن روی پیام هدف ری‌اکشن دارد یا نه.
+    بررسی وضعیت ری‌اکشن یک سشن روی پیام هدف.
     خروجی: {"ok": bool, "has_reaction": bool, "emojis": list[str], "reason": str|None}
-    - ok=False یعنی خطا در دریافت اطلاعات (مثلاً unauthorized)
-    - ok=True, has_reaction=False یعنی هیچ ری‌اکشنی روی پست ندارد
-    - ok=True, has_reaction=True یعنی حداقل یک ری‌اکشن دارد
     """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
@@ -608,7 +606,6 @@ async def _get_my_reaction_status(
                     return {"ok": False, "has_reaction": False, "emojis": [], "reason": "no message"}
                 target_msg_id = msgs[0].id
 
-        # دریافت پیام‌ها با reactions
         try:
             msgs = await client.get_messages(entity, ids=[target_msg_id])
         except Exception as e:
@@ -632,7 +629,6 @@ async def _get_my_reaction_status(
             if emoticon:
                 emojis.append(emoticon)
             else:
-                # custom emoji / document
                 document_id = getattr(reaction, "document_id", None)
                 if document_id:
                     emojis.append(f"custom:{document_id}")
@@ -646,6 +642,121 @@ async def _get_my_reaction_status(
             await client.disconnect()
         except Exception:
             pass
+
+
+async def _scan_all_sessions_reactions(
+    peer_str: str | None,
+    msg_id: int,
+    forward_info: dict | None = None,
+    progress_cb=None,
+) -> dict:
+    """
+    وضعیت ری‌اکشن همه سشن‌ها را جمع‌آوری می‌کند.
+    خروجی:
+      {
+        "total": int,
+        "scanned_ok": int,
+        "scanned_failed": int,
+        "no_reaction": [session_names...],
+        "with_reaction": [(session_name, [emojis])...],
+        "emoji_counts": {emoji: count},
+        "custom_emoji_counts": {doc_id: count},
+        "failed": [(session_name, reason)...],
+      }
+    """
+    sessions = list_sessions()
+    no_reaction: list[str] = []
+    with_reaction: list[tuple[str, list[str]]] = []
+    failed: list[tuple[str, str]] = []
+    emoji_counts: Counter = Counter()
+    custom_emoji_counts: Counter = Counter()
+
+    total = len(sessions)
+    if total == 0:
+        return {
+            "total": 0, "scanned_ok": 0, "scanned_failed": 0,
+            "no_reaction": [], "with_reaction": [], "failed": [],
+            "emoji_counts": {}, "custom_emoji_counts": {},
+        }
+
+    done = 0
+    for i in range(0, total, MAX_PARALLEL_CHECKS):
+        batch = sessions[i:i + MAX_PARALLEL_CHECKS]
+        results = await asyncio.gather(
+            *[_get_my_reaction_status(s, peer_str, msg_id, forward_info) for s in batch],
+            return_exceptions=True,
+        )
+        for s, r in zip(batch, results):
+            done += 1
+            if not isinstance(r, dict) or not r.get("ok"):
+                reason = r.get("reason") if isinstance(r, dict) else str(r)
+                failed.append((s, reason or "unknown"))
+                continue
+            if r["has_reaction"]:
+                emojis = r["emojis"]
+                with_reaction.append((s, emojis))
+                for e in emojis:
+                    if e.startswith("custom:"):
+                        custom_emoji_counts[e] += 1
+                    else:
+                        emoji_counts[e] += 1
+            else:
+                no_reaction.append(s)
+        if progress_cb:
+            try:
+                await progress_cb(done, total)
+            except Exception:
+                pass
+        if i + MAX_PARALLEL_CHECKS < total:
+            await asyncio.sleep(random.uniform(0.8, 1.8))
+
+    return {
+        "total": total,
+        "scanned_ok": len(no_reaction) + len(with_reaction),
+        "scanned_failed": len(failed),
+        "no_reaction": no_reaction,
+        "with_reaction": with_reaction,
+        "failed": failed,
+        "emoji_counts": dict(emoji_counts),
+        "custom_emoji_counts": dict(custom_emoji_counts),
+    }
+
+
+def _format_scan_report(scan: dict, is_remove: bool) -> str:
+    lines: list[str] = []
+    total = scan["total"]
+    no_react = len(scan["no_reaction"])
+    with_react = len(scan["with_reaction"])
+    failed = len(scan["failed"])
+
+    if is_remove:
+        lines.append(f"📊 <b>وضعیت ری‌اکشن روی این پست:</b>")
+        lines.append(f"• 🔴 {with_react} سشن ری‌اکشن دارند")
+        lines.append(f"• 🟢 {no_react} سشن هیچ ری‌اکشنی ندارند")
+    else:
+        lines.append(f"📊 <b>وضعیت ری‌اکشن روی این پست:</b>")
+        lines.append(f"• 🔴 {with_react} سشن ری‌اکشن دارند")
+        lines.append(f"• 🟢 {no_react} سشن آزاد (بدون ری‌اکشن)")
+        lines.append(f"\n<i>از سشن‌های آزاد برای زدن ری‌اکشن جدید استفاده می‌شود.</i>")
+
+    if scan["emoji_counts"]:
+        lines.append("\n🎭 <b>ایموجی‌هایی که این سشن‌ها زده‌اند:</b>")
+        # مرتب‌سازی نزولی بر اساس تعداد
+        sorted_emojis = sorted(scan["emoji_counts"].items(), key=lambda x: -x[1])
+        for emoji, cnt in sorted_emojis[:12]:
+            lines.append(f"  {emoji} × <b>{cnt}</b> سشن")
+        if len(sorted_emojis) > 12:
+            lines.append(f"  ... و {len(sorted_emojis) - 12} ایموجی دیگر")
+
+    if scan["custom_emoji_counts"]:
+        total_custom = sum(scan["custom_emoji_counts"].values())
+        lines.append(f"\n🎨 {total_custom} ری‌اکشن از نوع custom emoji (سند)")
+
+    if failed:
+        lines.append(f"\n⚠️ {failed} سشن قابل چک نبودند (غیرمجاز/خطا)")
+
+    return "\n".join(lines)
+
 
 # =========================================================
 # REACTION (single session)
@@ -740,6 +851,29 @@ def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
+    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
+    return InlineKeyboardMarkup(kb)
+
+def _remove_emoji_kb(emoji_counts: dict[str, int]) -> InlineKeyboardMarkup:
+    """
+    کیبورد انتخاب ایموجی برای حذف — فقط ایموجی‌هایی که واقعاً روی پست زده شده‌اند.
+    callback_data شامل ایموجی هست.
+    """
+    if not emoji_counts:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+        ])
+    kb, row = [], []
+    sorted_emojis = sorted(emoji_counts.items(), key=lambda x: -x[1])
+    for emoji, cnt in sorted_emojis[:24]:
+        label = f"{emoji} ({cnt})"
+        row.append(InlineKeyboardButton(label, callback_data=f"mobin_rm_em_{emoji}"))
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton("🗑 حذف همه ری‌اکشن‌ها (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
     kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
@@ -871,8 +1005,8 @@ async def mobin_cb(update: Update, context):
             "• <b>لینک پست</b> (مثل <code>https://t.me/chan/123</code>)\n"
             "• <b>@username</b> کانال (آخرین پست)\n"
             "• <b>فوروارد/کپی</b> کردن پست از کانال به اینجا\n\n"
-            "فقط ری‌اکشن‌هایی که خود کانال مجاز کرده نمایش داده می‌شود.\n"
-            "قبل از زدن، چک می‌شود کدام اکانت‌ها از قبل ری‌اکشن دارند.\n\n"
+            "بعد از ارسال هدف، ربات همه سشن‌ها را چک می‌کند و گزارش می‌دهد چه ری‌اکشن‌هایی روی پست هست و چند سشن آزاد است.\n"
+            "سپس فقط از سشن‌های آزاد برای زدن ری‌اکشن جدید استفاده می‌شود.\n\n"
             "برای انصراف دکمه «❌ لغو» را بزنید.",
             parse_mode="HTML",
             reply_markup=_cancel_inline_kb(),
@@ -888,7 +1022,8 @@ async def mobin_cb(update: Update, context):
             f"🚫 <b>برداشتن ری‌اکشن</b>\n\n"
             f"🔋 {len(sessions)} سشن موجود\n\n"
             "لینک پست را بفرستید یا پست را فوروارد/کپی کنید.\n"
-            "قبل از حذف، چک می‌شود کدام اکانت‌ها اصلاً ری‌اکشن ندارند.\n\n"
+            "بعد از ارسال هدف، ربات همه سشن‌ها را چک می‌کند و می‌گوید هر ایموجی توسط چند سشن زده شده.\n"
+            "سپس می‌توانید انتخاب کنید کدام ایموجی برداشته شود.\n\n"
             "برای انصراف دکمه «❌ لغو» را بزنید.",
             parse_mode="HTML",
             reply_markup=_cancel_inline_kb(),
@@ -902,6 +1037,25 @@ async def mobin_cb(update: Update, context):
         await q.message.edit_text(
             f"🎭 ایموجی انتخابی: {emoji}\n\n"
             f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
+            f"<i>اعداد را همینجا تایپ کنید.</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            ]),
+        )
+        return MOBIN_REACTION_WAITING_ACCOUNTS
+
+    if data.startswith("mobin_rm_em_"):
+        # انتخاب ایموجی برای حذف
+        emoji = data[len("mobin_rm_em_"):]
+        if emoji == "ALL":
+            context.user_data["mobin_remove_emoji"] = None  # یعنی همه
+        else:
+            context.user_data["mobin_remove_emoji"] = emoji
+        n = len(list_sessions())
+        await q.message.edit_text(
+            f"🚫 حذف ری‌اکشن {emoji if emoji != 'ALL' else 'همه'}\n\n"
+            f"🔢 تعداد سشن‌ها برای اجرا (حداکثر {min(n, 10)}):\n"
             f"<i>اعداد را همینجا تایپ کنید.</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
@@ -1017,7 +1171,7 @@ async def mobin_cb(update: Update, context):
 
     return MOBIN_ROOT
 
-# ---------- هدف ری‌اکشن: لینک یا فوروارد ----------
+# ---------- هدف ری‌اکشن ----------
 async def mobin_rx_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
@@ -1027,20 +1181,7 @@ async def mobin_rx_target(update: Update, context):
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
-        emojis = await _get_channel_reactions(forward_info=fwd)
-        if not emojis:
-            await msg.reply_text(
-                "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
-                "یا نتونستم به تنظیمات ری‌اکشن کانال دسترسی پیدا کنم.\n"
-                "برای انصراف دکمه «❌ لغو» را بزنید.",
-                reply_markup=_cancel_inline_kb(),
-            )
-            return MOBIN_REACTION_WAITING_TARGET
-        await msg.reply_text(
-            f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
-            reply_markup=_emoji_kb(emojis),
-        )
-        return MOBIN_REACTION_WAITING_EMOJI
+        return await _start_reaction_scan(update, context, peer=None, msg_id=0, forward_info=fwd)
 
     peer, msg_id = _parse_target_from_text(text)
     if not peer:
@@ -1056,8 +1197,19 @@ async def mobin_rx_target(update: Update, context):
     context.user_data["mobin_rx_peer"] = peer
     context.user_data["mobin_rx_msg_id"] = msg_id
     context.user_data["mobin_forward_info"] = None
+    return await _start_reaction_scan(update, context, peer=peer, msg_id=msg_id, forward_info=None)
 
-    emojis = await _get_channel_reactions(peer_str=peer)
+
+async def _start_reaction_scan(update, context, peer, msg_id, forward_info):
+    """اسکن همه سشن‌ها و گزارش وضعیت + نمایش ایموجی‌های مجاز."""
+    msg = update.message
+    sessions = list_sessions()
+    if not sessions:
+        await msg.reply_text("⚠️ هیچ سشن فعالی موجود نیست.", reply_markup=_cancel_inline_kb())
+        return MOBIN_REACTION_WAITING_TARGET
+
+    # 1) گرفتن ایموجی‌های مجاز کانال
+    emojis = await _get_channel_reactions(peer_str=peer, forward_info=forward_info)
     if not emojis:
         await msg.reply_text(
             "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
@@ -1067,13 +1219,48 @@ async def mobin_rx_target(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_TARGET
 
-    await msg.reply_text(
-        f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
+    # 2) اسکن همه سشن‌ها
+    progress_msg = await msg.reply_text(
+        f"🔍 در حال اسکن {len(sessions)} سشن برای بررسی ری‌اکشن‌های فعلی..."
+    )
+
+    async def progress_cb(done, total):
+        if done == total or done % 5 == 0:
+            try:
+                await progress_msg.edit_text(
+                    f"🔍 در حال اسکن سشن‌ها... ({done}/{total})"
+                )
+            except Exception:
+                pass
+
+    scan = await _scan_all_sessions_reactions(
+        peer, msg_id, forward_info, progress_cb=progress_cb
+    )
+
+    # ذخیره در context برای استفاده در مرحله بعد
+    context.user_data["mobin_scan_result"] = scan
+    context.user_data["mobin_rx_peer"] = peer
+    context.user_data["mobin_rx_msg_id"] = msg_id
+    context.user_data["mobin_forward_info"] = forward_info
+    context.user_data["mobin_rx_emojis_available"] = emojis
+
+    # 3) ساخت گزارش
+    report = _format_scan_report(scan, is_remove=False)
+    no_react_count = len(scan["no_reaction"])
+
+    await progress_msg.edit_text(
+        f"{report}\n\n"
+        f"🎭 حالا یک ایموجی مجاز انتخاب کنید "
+        f"({len(emojis)} مورد مجاز):\n"
+        f"<i>توجه: ری‌اکشن جدید فقط روی سشن‌های آزاد زده می‌شود"
+        f" (الان {no_react_count} سشن آزاد دارید).</i>",
+        parse_mode="HTML",
         reply_markup=_emoji_kb(emojis),
     )
     return MOBIN_REACTION_WAITING_EMOJI
 
-# ---------- برداشتن ری‌اکشن: هدف ----------
+
+# ---------- هدف برداشتن ری‌اکشن ----------
 async def mobin_remove_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
@@ -1083,13 +1270,7 @@ async def mobin_remove_target(update: Update, context):
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
-        await msg.reply_text(
-            f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):\n"
-            f"<i>عدد را تایپ کنید.</i>",
-            parse_mode="HTML",
-            reply_markup=_cancel_inline_kb(),
-        )
-        return MOBIN_REACTION_WAITING_ACCOUNTS
+        return await _start_remove_scan(update, context, peer=None, msg_id=0, forward_info=fwd)
 
     peer, msg_id = _parse_target_from_text(text)
     if not peer:
@@ -1103,14 +1284,62 @@ async def mobin_remove_target(update: Update, context):
     context.user_data["mobin_rx_peer"] = peer
     context.user_data["mobin_rx_msg_id"] = msg_id
     context.user_data["mobin_forward_info"] = None
+    return await _start_remove_scan(update, context, peer=peer, msg_id=msg_id, forward_info=None)
 
-    await msg.reply_text(
-        f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):\n"
-        f"<i>عدد را تایپ کنید.</i>",
-        parse_mode="HTML",
-        reply_markup=_cancel_inline_kb(),
+
+async def _start_remove_scan(update, context, peer, msg_id, forward_info):
+    """اسکن همه سشن‌ها برای حالت حذف + نمایش ایموجی‌های موجود روی پست."""
+    msg = update.message
+    sessions = list_sessions()
+    if not sessions:
+        await msg.reply_text("⚠️ هیچ سشن فعالی موجود نیست.", reply_markup=_cancel_inline_kb())
+        return MOBIN_REACTION_WAITING_REMOVE
+
+    progress_msg = await msg.reply_text(
+        f"🔍 در حال اسکن {len(sessions)} سشن برای بررسی ری‌اکشن‌های فعلی..."
     )
-    return MOBIN_REACTION_WAITING_ACCOUNTS
+
+    async def progress_cb(done, total):
+        if done == total or done % 5 == 0:
+            try:
+                await progress_msg.edit_text(
+                    f"🔍 در حال اسکن سشن‌ها... ({done}/{total})"
+                )
+            except Exception:
+                pass
+
+    scan = await _scan_all_sessions_reactions(
+        peer, msg_id, forward_info, progress_cb=progress_cb
+    )
+
+    context.user_data["mobin_scan_result"] = scan
+    context.user_data["mobin_rx_peer"] = peer
+    context.user_data["mobin_rx_msg_id"] = msg_id
+    context.user_data["mobin_forward_info"] = forward_info
+
+    report = _format_scan_report(scan, is_remove=True)
+
+    if not scan["with_reaction"]:
+        # هیچ سشنی ری‌اکشن ندارد
+        await progress_msg.edit_text(
+            f"{report}\n\n"
+            f"ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد — کاری برای حذف وجود ندارد.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            ]),
+        )
+        return MOBIN_ROOT
+
+    emoji_counts = scan["emoji_counts"]
+    await progress_msg.edit_text(
+        f"{report}\n\n"
+        f"🎭 کدام ایموجی برداشته شود؟ (روی هر ایموجی تعداد سشن‌هایی که آن را زده‌اند نوشته شده)",
+        parse_mode="HTML",
+        reply_markup=_remove_emoji_kb(emoji_counts),
+    )
+    return MOBIN_REACTION_WAITING_EMOJI_CHOICE
+
 
 # ---------- تعداد سشن‌ها -> اجرا ----------
 async def mobin_rx_count(update: Update, context):
@@ -1122,53 +1351,94 @@ async def mobin_rx_count(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_ACCOUNTS
 
-    count = int(text)
+    requested = int(text)
     sessions = list_sessions()
-    count = min(count, len(sessions), 10)
+    requested = min(requested, len(sessions), 10)
 
     peer = context.user_data.get("mobin_rx_peer")
     msg_id = context.user_data.get("mobin_rx_msg_id", 0)
     emoji = context.user_data.get("mobin_rx_emoji")
     fwd_info = context.user_data.get("mobin_forward_info")
+    scan = context.user_data.get("mobin_scan_result") or {}
+    remove_emoji = context.user_data.get("mobin_remove_emoji", "__NOT_SET__")
+
     is_remove = emoji is None
 
-    action_label = "برداشتن ری‌اکشن" if is_remove else f"ری‌اکشن {emoji}"
+    if is_remove:
+        # ===== حالت حذف =====
+        # سشن‌هایی که واقعاً ری‌اکشن دارند (از اسکن)
+        sessions_with_reaction = [s for s, _ in scan.get("with_reaction", [])]
+        if not sessions_with_reaction:
+            await update.message.reply_text(
+                "ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد — کاری برای حذف نیست.",
+                reply_markup=_main_kb(),
+            )
+            _clear_mobin_user_data(context)
+            return MOBIN_ROOT
+
+        # اگر کاربر ایموجی خاصی انتخاب کرده، فقط سشن‌هایی که همان ایموجی را زده‌اند
+        if remove_emoji != "__NOT_SET__" and remove_emoji is not None:
+            target_emoji = remove_emoji
+            filtered = []
+            for s, emojis in scan.get("with_reaction", []):
+                if target_emoji in emojis:
+                    filtered.append(s)
+            if not filtered:
+                await update.message.reply_text(
+                    f"ℹ️ هیچ سشنی ری‌اکشن {target_emoji} روی این پست ندارد.",
+                    reply_markup=_main_kb(),
+                )
+                _clear_mobin_user_data(context)
+                return MOBIN_ROOT
+            candidates = filtered
+            # برای حذف یک ایموجی خاص، به هر سشن باید reaction=[] بفرستیم
+            # (یعنی همه ری‌اکشن‌هایش برداشته شود) — یا می‌توان از API مخصوصش استفاده کرد
+            # ساده‌ترین راه: خالی کردن همه ری‌اکشن‌های همان سشن
+            action_label = f"حذف ری‌اکشن {target_emoji}"
+            selected = candidates[:requested]
+            emoji_to_send = None  # خالی کردن همه
+        else:
+            # حذف همه ایموجی‌ها از سشن‌های دارای ری‌اکشن
+            selected = sessions_with_reaction[:requested]
+            action_label = "حذف همه ری‌اکشن‌ها"
+            emoji_to_send = None
+
+    else:
+        # ===== حالت زدن ری‌اکشن =====
+        no_reaction_sessions = list(scan.get("no_reaction", []))
+        with_reaction_sessions = [s for s, _ in scan.get("with_reaction", [])]
+
+        # اول از سشن‌های آزاد
+        selected = no_reaction_sessions[:requested]
+        used_fallback = False
+        if len(selected) < requested:
+            # کمبود سشن آزاد → از سشن‌های ری‌اکشن‌دار هم استفاده کن (با هشدار)
+            remaining = requested - len(selected)
+            selected += with_reaction_sessions[:remaining]
+            used_fallback = True
+        emoji_to_send = emoji
+        action_label = f"ری‌اکشن {emoji}"
+
+    if not selected:
+        await update.message.reply_text(
+            "❌ سشنی برای اجرا پیدا نشد.",
+            reply_markup=_main_kb(),
+        )
+        _clear_mobin_user_data(context)
+        return MOBIN_ROOT
+
+    actual_count = len(selected)
     status_msg = await update.message.reply_text(
-        f"🚀 در حال اجرا ({action_label}) روی {count} سشن...\n"
-        f"🔍 اول چک می‌کنم وضعیت ری‌اکشن فعلی هر سشن..."
+        f"🚀 در حال اجرا ({action_label}) روی {actual_count} سشن..."
     )
 
-    selected = sessions[:count]
     ok_total = 0
     failed = []
-    already_had = []        # ری‌اکشن‌دار قبل از عملیات
-    had_no_reaction = []    # بدون ری‌اکشن قبل از عملیات (برای حالت حذف)
-    check_failed = []       # خطا در چک اولیه
 
-    # ===== مرحله ۱: چک وضعیت فعلی هر سشن =====
-    for i in range(0, len(selected), 3):
-        batch = selected[i:i+3]
-        checks = await asyncio.gather(
-            *[_get_my_reaction_status(s, peer, msg_id, fwd_info) for s in batch],
-            return_exceptions=True,
-        )
-        for s, r in zip(batch, checks):
-            if not isinstance(r, dict) or not r.get("ok"):
-                reason = r.get("reason") if isinstance(r, dict) else str(r)
-                check_failed.append(f"• <code>{s}</code>: {reason}")
-                continue
-            if r["has_reaction"]:
-                already_had.append((s, r["emojis"]))
-            else:
-                had_no_reaction.append(s)
-        if i + 3 < len(selected):
-            await asyncio.sleep(random.uniform(1.5, 3))
-
-    # ===== مرحله ۲: اجرای عملیات =====
     for i in range(0, len(selected), 3):
         batch = selected[i:i+3]
         results = await asyncio.gather(
-            *[_react_one_session(s, peer, msg_id, emoji, fwd_info) for s in batch],
+            *[_react_one_session(s, peer, msg_id, emoji_to_send, fwd_info) for s in batch],
             return_exceptions=True,
         )
         for s, r in zip(batch, results):
@@ -1180,30 +1450,18 @@ async def mobin_rx_count(update: Update, context):
         if i + 3 < len(selected):
             await asyncio.sleep(random.uniform(3, 7))
 
-    # ===== ساخت گزارش =====
-    lines = [f"✅ موفق: {ok_total}/{count}"]
+    # ===== ساخت گزارش نهایی =====
+    lines = [f"✅ موفق: {ok_total}/{actual_count}"]
 
-    if not is_remove:
-        # حالت ری‌اکشن زدن
-        if already_had:
-            lines.append(f"\n⚠️ {len(already_had)} اکانت از قبل ری‌اکشن داشتند:")
-            for name, emojis in already_had[:8]:
-                emoji_str = "، ".join(emojis[:3]) if emojis else "نامشخص"
-                lines.append(f"  • <code>{name}</code> — {emoji_str}")
-            if len(already_had) > 8:
-                lines.append(f"  ... و {len(already_had) - 8} تای دیگر")
+    if is_remove:
+        lines.append(f"\n🗑 عملیات: {action_label}")
     else:
-        # حالت حذف ری‌اکشن
-        if had_no_reaction:
-            lines.append(f"\n🟡 {len(had_no_reaction)} اکانت هیچ ری‌اکشنی نداشتند (کاری لازم نبود):")
-            for name in had_no_reaction[:8]:
-                lines.append(f"  • <code>{name}</code>")
-            if len(had_no_reaction) > 8:
-                lines.append(f"  ... و {len(had_no_reaction) - 8} تای دیگر")
-
-    if check_failed:
-        lines.append(f"\n🔎 خطا در چک اولیه ({len(check_failed)}):")
-        lines.extend(check_failed[:5])
+        no_count = len(scan.get("no_reaction", []))
+        with_count = len(scan.get("with_reaction", []))
+        lines.append(f"\n🔋 از سشن‌های آزاد استفاده شد: {min(actual_count, no_count)}")
+        if used_fallback and actual_count > no_count:
+            extra = actual_count - no_count
+            lines.append(f"⚠️ {extra} سشن دیگر از بین سشن‌های ری‌اکشن‌دار انتخاب شد (کمبود سشن آزاد)")
 
     if failed:
         lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
@@ -1215,9 +1473,7 @@ async def mobin_rx_count(update: Update, context):
     except Exception:
         await update.message.reply_text(summary, parse_mode="HTML")
 
-    for k in ["mobin_rx_peer", "mobin_rx_msg_id", "mobin_rx_emoji", "mobin_forward_info"]:
-        context.user_data.pop(k, None)
-
+    _clear_mobin_user_data(context)
     await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
     return MOBIN_ROOT
 
@@ -1362,6 +1618,9 @@ def build_mobin_handler():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+            ],
+            MOBIN_REACTION_WAITING_EMOJI_CHOICE: [
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
