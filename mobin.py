@@ -8,6 +8,7 @@ import hashlib
 import io as iolib
 import html
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -27,9 +28,9 @@ from telegram.ext import (
     filters,
 )
 
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.types import ReactionEmoji, AvailableReactions
 
 mobin_logger = logging.getLogger("mobin")
 mobin_logger.setLevel(logging.INFO)
@@ -41,13 +42,20 @@ MOBIN_BACKUP_ZIP = "/tmp/mobin_backup.zip"
 MOBIN_RESTORE_ZIP = "/tmp/mobin_restore.zip"
 DEFAULT_PASSWORD = "من مبینم"
 
+# کش برای ری‌اکشن‌های مجاز (12 ساعت معتبر)
+_reactions_cache = {
+    "list": None,
+    "fetched_at": 0,
+    "ttl": 12 * 60 * 60,
+}
+
 # ---------- STATES ----------
 (
     MOBIN_ROOT,
     MOBIN_WAITING_PASSWORD,
     MOBIN_WAITING_NEW_PASSWORD,
     MOBIN_REACTION_WAITING_TARGET,
-    MOBIN_REACTION_WAITING_EMOJI,       # دیگر استفاده نمی‌شود (ایموجی اینلاین شد)
+    MOBIN_REACTION_WAITING_EMOJI,
     MOBIN_REACTION_WAITING_ACCOUNTS,
     MOBIN_WAITING_IMPORT_ZIP,
     MOBIN_WAITING_ADD_SESSION_ZIP,
@@ -315,13 +323,59 @@ def restore_mobin_from_telegram() -> bool:
         return False
 
 # =========================================================
+# AVAILABLE REACTIONS (dynamic)
+# =========================================================
+async def _get_available_reactions() -> list[str]:
+    """
+    لیست ایموجی‌های مجاز تلگرام را برمی‌گرداند.
+    از کش استفاده می‌کند. اگر کش خالی بود، با اولین session موجود درخواست می‌زند.
+    """
+    now = time.time()
+    if (_reactions_cache["list"] is not None
+            and now - _reactions_cache["fetched_at"] < _reactions_cache["ttl"]):
+        return _reactions_cache["list"]
+
+    sessions = list_sessions()
+    if not sessions:
+        # اگر هیچ session نداری، لیست پیش‌فرض امن
+        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+
+    data = load_mobin_data()
+    api_id = data.get("api_id", 2040)
+    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+    sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{sessions[0]}.session")
+
+    client = TelegramClient(sess_path, api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+
+        result = await client(functions.messages.GetAvailableReactionsRequest(hash=0))
+        if isinstance(result, AvailableReactions):
+            emojis = []
+            for r in result.reactions:
+                if hasattr(r, "reaction") and hasattr(r.reaction, "emoticon"):
+                    emojis.append(r.reaction.emoticon)
+            if emojis:
+                _reactions_cache["list"] = emojis
+                _reactions_cache["fetched_at"] = now
+                mobin_logger.info(f"Fetched {len(emojis)} available reactions")
+                return emojis
+        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+    except Exception as e:
+        mobin_logger.error(f"get_available_reactions failed: {e}")
+        return ["👍", "👎", "❤️", "🔥", "🎉", "😁", "😢", "😡"]
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+# =========================================================
 # REACTION TARGET PARSING
 # =========================================================
 def _parse_target_from_text(text: str):
-    """
-    از یک متن (لینک یا @username) target رو استخراج می‌کنه.
-    Returns: (peer_str_or_id, msg_id)  یا (None, None) اگه نامعتبر بود.
-    """
     t = text.strip()
     msg_id = 0
     if "/t.me/" in t or "t.me/" in t:
@@ -336,7 +390,6 @@ def _parse_target_from_text(text: str):
     if t.startswith("@"):
         return t[1:], 0
     if t.startswith("https://") or t.startswith("http://"):
-        # سعی کن آخریش رو بگیری
         parts = [p for p in t.rstrip("/").split("/") if p]
         if parts:
             last = parts[-1]
@@ -346,22 +399,15 @@ def _parse_target_from_text(text: str):
             else:
                 peer = last
             return peer, msg_id
-    # اگر عدد بود -> فرض کن channel_id هست (نمیشه راحت resolve کرد)
     return None, None
 
 def _extract_forward_info(message) -> dict | None:
-    """
-    اگه message فوروارد شده باشه، chat_id و message_id رو برمی‌گردونه.
-    Returns: {"chat_id": int, "message_id": int} یا None
-    """
     if not message:
         return None
-    # forward_from_chat + forward_from_message_id
     fwd_chat = getattr(message, "forward_from_chat", None)
     fwd_msg_id = getattr(message, "forward_from_message_id", None)
     if fwd_chat is not None and fwd_msg_id:
         return {"chat_id": fwd_chat.id, "message_id": int(fwd_msg_id)}
-    # forward_origin (API جدید)
     fwd_origin = getattr(message, "forward_origin", None)
     if fwd_origin is not None:
         origin_chat = getattr(fwd_origin, "chat", None)
@@ -377,7 +423,7 @@ async def _react_one_session(
     session_name: str,
     peer_str: str | None,
     msg_id: int,
-    emoji: str | None,          # None => برداشتن ری‌اکشن
+    emoji: str | None,
     forward_info: dict | None = None,
 ) -> dict:
     data = load_mobin_data()
@@ -393,9 +439,7 @@ async def _react_one_session(
         if not await client.is_user_authorized():
             return {"ok": False, "reason": "unauthorized"}
 
-        # تعیین entity و msg_id
         if forward_info:
-            # از روی فوروارد: chat_id عددی
             try:
                 entity = await client.get_entity(forward_info["chat_id"])
             except Exception as e:
@@ -408,7 +452,6 @@ async def _react_one_session(
             if msg_id:
                 target_msg_id = msg_id
             else:
-                # آخرین پیام کانال
                 msgs = await client.get_messages(entity, limit=1)
                 if not msgs:
                     return {"ok": False, "reason": "no message"}
@@ -451,16 +494,10 @@ def _main_kb() -> InlineKeyboardMarkup:
 def _cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
 
-# ایموجی‌های مجاز برای ری‌اکشن (اینلاین)
-_EMOJI_CHOICES = [
-    "❤️", "🔥", "👍", "👎", "😂", "😢", "😮", "😡",
-    "🎉", "💯", "⚡", "👏", "🤔", "🙏", "👌", "💔",
-    "🌚", "🌭", "🍾", "💊", "🙈", "😍", "🤯", "🤬",
-]
-
-def _emoji_kb() -> InlineKeyboardMarkup:
+def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
+    """کیبورد اینلاین با ایموجی‌های مجاز (پویا)."""
     kb, row = [], []
-    for e in _EMOJI_CHOICES:
+    for e in emojis[:24]:  # حداکثر 24 تا برای جلوگیری از شلوغی
         row.append(InlineKeyboardButton(e, callback_data=f"mobin_em_{e}"))
         if len(row) == 4:
             kb.append(row)
@@ -495,7 +532,6 @@ def _is_password_ok(text: str) -> bool:
     return text.strip() == load_mobin_data().get("password", DEFAULT_PASSWORD)
 
 async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین</b>"):
-    """ارسال منوی اصلی — چه با edit چه با reply."""
     if update.callback_query and update.callback_query.message:
         try:
             await update.callback_query.message.edit_text(
@@ -555,7 +591,6 @@ async def mobin_cb(update: Update, context):
         await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return MOBIN_ROOT
 
-    # ---- بستن ----
     if data == "mobin_close":
         context.user_data.pop("mobin_authenticated", None)
         try:
@@ -565,12 +600,10 @@ async def mobin_cb(update: Update, context):
         await q.message.reply_text("پنل بسته شد.")
         return ConversationHandler.END
 
-    # ---- بازگشت به پنل ----
     if data == "mobin_back":
         await _send_main_menu(update, context)
         return MOBIN_ROOT
 
-    # ---- ری‌اکشن فیک (شروع) ----
     if data == "mobin_reaction":
         sessions = list_sessions()
         if not sessions:
@@ -592,7 +625,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_TARGET
 
-    # ---- برداشتن ری‌اکشن (شروع) ----
     if data == "mobin_remove_reaction":
         sessions = list_sessions()
         if not sessions:
@@ -607,7 +639,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_REMOVE
 
-    # ---- انتخاب ایموجی از اینلاین ----
+    # ---- انتخاب ایموجی از اینلاین (پویا) ----
     if data.startswith("mobin_em_"):
         emoji = data[len("mobin_em_"):]
         context.user_data["mobin_rx_emoji"] = emoji
@@ -621,7 +653,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_REACTION_WAITING_ACCOUNTS
 
-    # ---- اضافه کردن سشن ----
     if data == "mobin_add_sessions":
         await q.message.reply_text(
             "📥 ZIP حاوی فایل‌های <code>.session</code> را ارسال کنید.\n\n"
@@ -636,7 +667,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_WAITING_ADD_SESSION_ZIP
 
-    # ---- لیست سشن‌ها ----
     if data == "mobin_sessions_list":
         names = list_sessions()
         if not names:
@@ -655,7 +685,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
-    # ---- حذف همه ----
     if data == "mobin_del_all_sessions":
         count = delete_all_sessions()
         _schedule_backup_upload()
@@ -667,7 +696,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # ---- حذف یک سشن ----
     if data.startswith("mobin_del_session_"):
         name = data[len("mobin_del_session_"):]
         if delete_session(name):
@@ -691,7 +719,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
-    # ---- دریافت بکاپ ----
     if data == "mobin_backup_get":
         raw = _build_backup_zip()
         await q.message.reply_document(
@@ -703,7 +730,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # ---- وارد کردن بکاپ ----
     if data == "mobin_backup_import":
         await q.message.reply_text(
             "📥 فایل ZIP بکاپ را ارسال کنید:",
@@ -711,7 +737,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_WAITING_IMPORT_ZIP
 
-    # ---- تغییر رمز ----
     if data == "mobin_change_password":
         await q.message.reply_text(
             "🔑 رمز جدید (حداقل ۳ کاراکتر):",
@@ -726,25 +751,22 @@ async def mobin_rx_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
 
-    # ---- لغو ----
     if text == "❌ لغو":
         await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
         return MOBIN_ROOT
 
-    # ---- فوروارد / کپی ----
     fwd = _extract_forward_info(msg)
     if fwd:
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
-        # برو به انتخاب ایموجی
+        emojis = await _get_available_reactions()
         await msg.reply_text(
-            "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
-            reply_markup=_emoji_kb(),
+            f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
+            reply_markup=_emoji_kb(emojis),
         )
         return MOBIN_REACTION_WAITING_EMOJI
 
-    # ---- لینک یا @username ----
     peer, msg_id = _parse_target_from_text(text)
     if not peer:
         await msg.reply_text(
@@ -759,9 +781,10 @@ async def mobin_rx_target(update: Update, context):
     context.user_data["mobin_rx_msg_id"] = msg_id
     context.user_data["mobin_forward_info"] = None
 
+    emojis = await _get_available_reactions()
     await msg.reply_text(
-        "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
-        reply_markup=_emoji_kb(),
+        f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
+        reply_markup=_emoji_kb(emojis),
     )
     return MOBIN_REACTION_WAITING_EMOJI
 
@@ -817,7 +840,7 @@ async def mobin_rx_count(update: Update, context):
 
     peer = context.user_data.get("mobin_rx_peer")
     msg_id = context.user_data.get("mobin_rx_msg_id", 0)
-    emoji = context.user_data.get("mobin_rx_emoji")   # None => برداشتن
+    emoji = context.user_data.get("mobin_rx_emoji")
     fwd_info = context.user_data.get("mobin_forward_info")
 
     action_label = "برداشتن ری‌اکشن" if not emoji else f"ری‌اکشن {emoji}"
@@ -851,11 +874,9 @@ async def mobin_rx_count(update: Update, context):
     except Exception:
         await update.message.reply_text(summary, parse_mode="HTML")
 
-    # پاک‌سازی state
     for k in ["mobin_rx_peer", "mobin_rx_msg_id", "mobin_rx_emoji", "mobin_forward_info"]:
         context.user_data.pop(k, None)
 
-    # برگرد به پنل
     await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
     return MOBIN_ROOT
 
@@ -982,21 +1003,14 @@ def build_mobin_handler():
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_TARGET: [
-                # لینک/متن یا فوروارد
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    mobin_rx_target,
-                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_target),
                 MessageHandler(filters.FORWARDED, mobin_rx_target),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_REMOVE: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    mobin_remove_target,
-                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
