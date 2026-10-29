@@ -2010,6 +2010,99 @@ async def mobin_rx_count(update: Update, context):
     return MOBIN_ROOT
 
 
+
+# ---------- وارد کردن بکاپ ----------
+async def mobin_import_zip(update: Update, context):
+    doc = update.message.document
+    if not doc or not (doc.file_name or "").lower().endswith(".zip"):
+        await update.message.reply_text(
+            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
+            reply_markup=_cancel_inline_kb(),
+        )
+        return MOBIN_WAITING_IMPORT_ZIP
+
+    file = await doc.get_file()
+    raw = await file.download_as_bytearray()
+    raw_bytes = bytes(raw)
+
+    try:
+        with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
+            if "mobin.json" in zf.namelist():
+                with open(MOBIN_DATA_FILE, "wb") as f:
+                    f.write(zf.read("mobin.json"))
+
+        result = await import_sessions_zip(raw_bytes)
+        _schedule_backup_upload()
+        n = len(list_sessions())
+        report = _format_import_report(result)
+        await update.message.reply_text(
+            f"✅ بکاپ پردازش شد — {n} سشن فعال.\n\n{report}",
+            parse_mode="HTML",
+            reply_markup=_main_kb(),
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ خطا: {e}",
+            reply_markup=_cancel_inline_kb(),
+        )
+        return MOBIN_WAITING_IMPORT_ZIP
+    return MOBIN_ROOT
+
+
+# ---------- اضافه کردن سشن‌ها با ZIP ----------
+async def mobin_add_sessions_zip(update: Update, context):
+    doc = update.message.document
+    if not doc or not (doc.file_name or "").lower().endswith(".zip"):
+        await update.message.reply_text(
+            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
+            reply_markup=_cancel_inline_kb(),
+        )
+        return MOBIN_WAITING_ADD_SESSION_ZIP
+
+    file = await doc.get_file()
+    raw = await file.download_as_bytearray()
+    raw_bytes = bytes(raw)
+
+    status = await update.message.reply_text("⏳ در حال پردازش ZIP...")
+
+    result = await import_sessions_zip(raw_bytes)
+
+    if (not result["imported"]
+            and not result["skipped_existing"]
+            and not result["skipped_duplicate_in_zip"]
+            and not result["errors"]):
+        try:
+            await status.edit_text(
+                "❌ هیچ فایل <code>.session</code> در ZIP پیدا نشد.",
+                parse_mode="HTML",
+                reply_markup=_main_kb(),
+            )
+        except Exception:
+            await update.message.reply_text(
+                "❌ هیچ فایل .session در ZIP پیدا نشد.",
+                reply_markup=_main_kb(),
+            )
+        return MOBIN_ROOT
+
+    _schedule_backup_upload()
+    total = len(list_sessions())
+    report = _format_import_report(result)
+
+    try:
+        await status.edit_text(
+            f"📊 مجموع: {total} سشن\n\n{report}",
+            parse_mode="HTML",
+            reply_markup=_main_kb(),
+        )
+    except Exception:
+        await update.message.reply_text(
+            f"📊 مجموع: {total} سشن\n\n{report}",
+            parse_mode="HTML",
+            reply_markup=_main_kb(),
+        )
+    return MOBIN_ROOT
+
+
 async def mobin_cancel(update: Update, context):
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
