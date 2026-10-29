@@ -55,6 +55,9 @@ _FALLBACK_EMOJIS = [
     "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳",
 ]
 
+# Background tasks tracking: task_id -> {"cancel_event": Event, "task": asyncio.Task, "status_msg": msg, "info": dict}
+_bg_tasks = {}
+
 # ---------- STATES ----------
 (
     MOBIN_ROOT,
@@ -80,7 +83,6 @@ _mobin_ctx = {
     "backup_upload": None,
     "backup_download": None,
     "loop_getter": None,
-    "active_delayed_tasks": {},   # user_id -> asyncio.Task
 }
 
 
@@ -516,10 +518,11 @@ async def _resolve_target_entity(client, peer_str, forward_info):
 
 
 # =========================================================
-# AVAILABLE REACTIONS
+# AVAILABLE REACTIONS (Including Post Existing Reactions)
 # =========================================================
 async def _get_channel_reactions(
     peer_str: str | None = None,
+    msg_id: int = 0,
     forward_info: dict | None = None,
 ) -> list[str]:
     sessions = list_sessions()
@@ -541,40 +544,53 @@ async def _get_channel_reactions(
         if entity is None:
             return []
 
+        allowed_emojis = []
         chat_reactions = None
         try:
             full = await client(functions.channels.GetFullChannelRequest(entity))
-            chat_reactions = getattr(
-                full.full_chat, "available_reactions", None)
+            chat_reactions = getattr(full.full_chat, "available_reactions", None)
         except Exception:
             try:
                 full = await client(functions.messages.GetFullChatRequest(entity.id))
-                chat_reactions = getattr(
-                    full.full_chat, "available_reactions", None)
+                chat_reactions = getattr(full.full_chat, "available_reactions", None)
             except Exception:
                 chat_reactions = None
 
         if chat_reactions is None:
-            return await _get_global_reactions(client)
+            allowed_emojis = await _get_global_reactions(client)
+        else:
+            class_name = type(chat_reactions).__name__
+            if "None" in class_name:
+                allowed_emojis = []
+            elif "All" in class_name:
+                allowed_emojis = await _get_global_reactions(client)
+            elif "Some" in class_name:
+                reactions = getattr(chat_reactions, "reactions", []) or []
+                emojis = []
+                for r in reactions:
+                    emoticon = getattr(r, "emoticon", None)
+                    if emoticon:
+                        emojis.append(emoticon)
+                allowed_emojis = emojis
 
-        class_name = type(chat_reactions).__name__
+        # --- دریافت ایموجی‌های فعال روی خود پیام (حتی اگر الان بسته باشند) ---
+        target_mid = int(forward_info["message_id"]) if forward_info else int(msg_id or 0)
+        post_emojis = []
+        if target_mid > 0:
+            try:
+                msgs = await client.get_messages(entity, ids=[target_mid])
+                if msgs and msgs[0] and getattr(msgs[0], "reactions", None):
+                    results = getattr(msgs[0].reactions, "results", None) or []
+                    for rc in results:
+                        react_obj = getattr(rc, "reaction", None)
+                        s = _reaction_to_str(react_obj)
+                        if s:
+                            post_emojis.append(s)
+            except Exception as e:
+                mobin_logger.debug(f"check post reactions failed: {e}")
 
-        if "None" in class_name:
-            return []
-
-        if "All" in class_name:
-            return await _get_global_reactions(client)
-
-        if "Some" in class_name:
-            reactions = getattr(chat_reactions, "reactions", []) or []
-            emojis = []
-            for r in reactions:
-                emoticon = getattr(r, "emoticon", None)
-                if emoticon:
-                    emojis.append(emoticon)
-            return emojis
-
-        return []
+        combined = list(dict.fromkeys(post_emojis + allowed_emojis))
+        return combined
 
     except Exception as e:
         mobin_logger.error(f"get_channel_reactions failed: {e}")
@@ -1009,120 +1025,90 @@ def _split_delays(total_seconds: float, n: int) -> list[float]:
     return delays
 
 
-async def _run_delayed_reaction_task(
-    bot,
-    user_id: int,
-    chat_id: int,
-    status_msg_id: int,
-    selected: list[str],
-    keep_emojis_per_session: dict | None,
-    emoji_to_send: str | None,
+# =========================================================
+# BACKGROUND DELAYED WORKER (Non-blocking & Cancellable)
+# =========================================================
+async def _background_delayed_runner(
+    task_id: str,
+    status_msg,
+    scheduled_tasks: list,
     peer,
-    msg_id: int,
+    msg_id,
     fwd_info,
-    delay_seconds: float,
-    is_remove: bool,
     action_label: str,
-    used_no_reaction: int,
-    used_unknown: int,
-    used_with_reaction: int,
+    delay_seconds: float,
+    used_stats: dict,
+    cancel_event: asyncio.Event,
 ):
-    """اجرای حالت تأخیری در task جداگانه تا event loop آزاد بماند."""
-    try:
-        tasks_data: list[tuple[str, str | None, list[str] | None, float]] = []
-        for s in selected:
-            if keep_emojis_per_session is not None:
-                tasks_data.append((s, None, keep_emojis_per_session.get(s, []), 0.0))
-            else:
-                tasks_data.append((s, emoji_to_send, None, 0.0))
+    actual_count = len(scheduled_tasks)
+    start_time = time.time()
+    ok_total = 0
+    failed = []
 
-        delays = _split_delays(delay_seconds, len(selected))
-        indexed = list(enumerate(tasks_data))
-        random.shuffle(indexed)
-        scheduled = []
-        for new_idx, (_, task) in enumerate(indexed):
-            s, emj, keep, _ = task
-            scheduled.append((s, emj, keep, delays[new_idx]))
-
-        async def _run_one(session_name, emj, keep, delay_before):
+    async def _run_delayed_single(session_name, emj, keep, delay_before):
+        try:
+            # چک کردن کنسلی در زمان انتظار
             if delay_before > 0:
-                await asyncio.sleep(delay_before)
-            if keep is not None:
-                return await _react_one_session(
-                    session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
-                )
-            return await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
+                await asyncio.wait_for(cancel_event.wait(), timeout=delay_before)
+                return {"ok": False, "reason": "لغو شده توسط کاربر"}
+        except asyncio.TimeoutError:
+            pass  # زمان انتظار به پایان رسید بدون کنسلی
 
-        start_time = time.time()
-        coros = [_run_one(s, emj, keep, d) for s, emj, keep, d in scheduled]
-        results = await asyncio.gather(*coros, return_exceptions=True)
+        if cancel_event.is_set():
+            return {"ok": False, "reason": "لغو شده توسط کاربر"}
 
-        ok_total = 0
-        failed = []
-        for (s, emj, keep, d), r in zip(scheduled, results):
-            if isinstance(r, dict) and r.get("ok"):
-                ok_total += 1
-            else:
-                reason = r.get("reason") if isinstance(r, dict) else str(r)
-                failed.append(f"• <code>{s}</code>: {reason}")
+        if keep is not None:
+            return await _react_one_session(
+                session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
+            )
+        return await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
 
-        elapsed = time.time() - start_time
+    coros = [
+        _run_delayed_single(s, emj, keep, d)
+        for (s, emj, keep), d in scheduled_tasks
+    ]
 
-        lines = [f"✅ موفق: {ok_total}/{len(selected)}"]
-        lines.append(
-            f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})")
+    results = await asyncio.gather(*coros, return_exceptions=True)
 
-        if is_remove:
-            lines.append(f"\n🗑 عملیات: {action_label}")
+    for ((s, emj, keep), _d), r in zip(scheduled_tasks, results):
+        if isinstance(r, dict) and r.get("ok"):
+            ok_total += 1
         else:
-            lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
-            if used_no_reaction:
-                lines.append(f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
-            if used_unknown:
-                lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
-            if used_with_reaction:
-                lines.append(
-                    f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
+            reason = r.get("reason") if isinstance(r, dict) else str(r)
+            failed.append(f"• <code>{s}</code>: {reason}")
 
-        if failed:
-            lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
-            lines.extend(failed[:10])
+    elapsed = time.time() - start_time
+    was_cancelled = cancel_event.is_set()
 
-        summary = "\n".join(lines)
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text=summary,
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+    title = "🛑 <b>عملیات تاخیری لغو شد</b>" if was_cancelled else "✅ <b>پایان عملیات تاخیری</b>"
+    lines = [
+        title,
+        f"📊 ثبت موفق: {ok_total}/{actual_count}",
+        f"⏱ زمان سپری‌شده: <b>{elapsed:.1f}</b> ثانیه (تنظیم کل: {delay_seconds:g})",
+    ]
 
-    except asyncio.CancelledError:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text="🛑 عملیات تاخیری لغو شد.",
-            )
-        except Exception:
-            pass
-        raise
+    if used_stats.get("is_remove"):
+        lines.append(f"\n🗑 عملیات: {action_label}")
+    else:
+        lines.append("\n🔋 <b>ترکیب سشن‌ها:</b>")
+        if used_stats.get("no_react"):
+            lines.append(f"  • 🟢 {used_stats['no_react']} سشن آزاد")
+        if used_stats.get("unknown"):
+            lines.append(f"  • 🟡 {used_stats['unknown']} سشن نامشخص")
+        if used_stats.get("with_react"):
+            lines.append(f"  • 🔴 {used_stats['with_react']} سشن ری‌اکشن‌دار")
 
-    except Exception as e:
-        mobin_logger.error(f"delayed reaction task failed: {e}")
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_msg_id,
-                text=f"❌ خطا در اجرای تاخیری: {e}",
-            )
-        except Exception:
-            pass
+    if failed:
+        lines.append(f"\n⚠️ موارد ناموفق یا متوقف‌شده ({len(failed)}):")
+        lines.extend(failed[:6])
 
-    finally:
-        _mobin_ctx["active_delayed_tasks"].pop(user_id, None)
+    summary = "\n".join(lines)
+    try:
+        await status_msg.edit_text(summary, parse_mode="HTML")
+    except Exception:
+        pass
+
+    _bg_tasks.pop(task_id, None)
 
 
 # =========================================================
@@ -1130,23 +1116,18 @@ async def _run_delayed_reaction_task(
 # =========================================================
 def _main_kb() -> InlineKeyboardMarkup:
     n = len(list_sessions())
+    active_bg = len(_bg_tasks)
+    bg_btn_text = f"⏳ عملیات‌های در حال اجرا ({active_bg})" if active_bg else "⏳ عملیات‌های فعال (۰)"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
-        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن",
-                              callback_data="mobin_remove_reaction")],
-        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها",
-                              callback_data="mobin_clean_sessions")],
-        [InlineKeyboardButton(
-            f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
-        [InlineKeyboardButton(
-            f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
-        [InlineKeyboardButton(
-            "📤 دریافت بکاپ", callback_data="mobin_backup_get")],
-        [InlineKeyboardButton("📥 وارد کردن بکاپ",
-                              callback_data="mobin_backup_import")],
-        [InlineKeyboardButton(
-            "🔑 تغییر رمز", callback_data="mobin_change_password")],
+        [InlineKeyboardButton("⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
+        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن", callback_data="mobin_remove_reaction")],
+        [InlineKeyboardButton(bg_btn_text, callback_data="mobin_list_bg_tasks")],
+        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها", callback_data="mobin_clean_sessions")],
+        [InlineKeyboardButton(f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
+        [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
+        [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
+        [InlineKeyboardButton("📥 وارد کردن بکاپ", callback_data="mobin_backup_import")],
+        [InlineKeyboardButton("🔑 تغییر رمز", callback_data="mobin_change_password")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="mobin_close")],
     ])
 
@@ -1160,8 +1141,7 @@ def _cancel_inline_kb() -> InlineKeyboardMarkup:
 def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
     if not emojis:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     for e in emojis[:24]:
@@ -1171,41 +1151,34 @@ def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton(
-        "❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _remove_emoji_kb(emoji_counts: dict[str, int]) -> InlineKeyboardMarkup:
     if not emoji_counts:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     sorted_emojis = sorted(emoji_counts.items(), key=lambda x: -x[1])
     for emoji, cnt in sorted_emojis[:24]:
         label = f"{emoji} ({cnt})"
-        row.append(InlineKeyboardButton(
-            label, callback_data=f"mobin_rm_em_{emoji}"))
+        row.append(InlineKeyboardButton(label, callback_data=f"mobin_rm_em_{emoji}"))
         if len(row) == 2:
             kb.append(row)
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton(
-        "🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
-    kb.append([InlineKeyboardButton(
-        "❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton("🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
+    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _mode_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ فوری (همین الان)",
-                              callback_data="mobin_mode_instant")],
-        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)",
-                              callback_data="mobin_mode_delayed")],
+        [InlineKeyboardButton("⚡ فوری (همین الان)", callback_data="mobin_mode_instant")],
+        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)", callback_data="mobin_mode_delayed")],
         [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")],
     ])
 
@@ -1214,11 +1187,9 @@ def _sessions_kb() -> InlineKeyboardMarkup:
     names = list_sessions()
     kb = []
     for name in names[:20]:
-        kb.append([InlineKeyboardButton(
-            f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
+        kb.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
     if names:
-        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها",
-                  callback_data="mobin_del_all_sessions")])
+        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها", callback_data="mobin_del_all_sessions")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")])
     return InlineKeyboardMarkup(kb)
 
@@ -1255,12 +1226,6 @@ def _clear_mobin_user_data(context, keep_auth: bool = True):
             if keep_auth and k == "mobin_authenticated":
                 continue
             context.user_data.pop(k, None)
-
-
-def _cancel_active_task(user_id: int):
-    task = _mobin_ctx["active_delayed_tasks"].get(user_id)
-    if task is not None and not task.done():
-        task.cancel()
 
 
 # =========================================================
@@ -1310,8 +1275,7 @@ async def mobin_mode_instant(update: Update, context):
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1323,13 +1287,12 @@ async def mobin_mode_delayed(update: Update, context):
     context.user_data["mobin_delay_mode"] = "delayed"
     await q.message.edit_text(
         "⏱ <b>حالت تاخیری</b>\n\n"
-        "کل زمان پخش را به <b>ثانیه</b> بفرستید (مثلاً <code>60</code>).\n"
-        "ربات این زمان را بین همه سشن‌های انتخاب‌شده به صورت نامساوی تقسیم می‌کند.\n\n"
-        "<i>مثال: ۶۰ ثانیه و ۵ سشن → هر سشن در یک لحظه متفاوت بین ۰ تا ۶۰ ثانیه ری‌اکشن می‌زند.</i>",
+        "کل زمان پخش را به <b>ثانیه</b> بفرستید (مثلاً <code>60</code> یا <code>90</code>).\n"
+        "عملیات در پس‌زمینه اجرا می‌شود؛ ربات آزاد می‌ماند و می‌توانید بلافاصله سفارش جدید بزنید یا حین کار آن را لغو کنید.\n\n"
+        "<i>زمان کل را به ثانیه تایپ کنید:</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_DELAY
@@ -1360,8 +1323,7 @@ async def mobin_delay_seconds(update: Update, context):
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1378,9 +1340,6 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     if data == "mobin_cancel_action":
-        # کنسل task تأخیری در حال اجرا (اگر وجود داشته باشد)
-        _cancel_active_task(user_id)
-
         ev = context.user_data.get("mobin_cancel_event")
         if ev is not None:
             ev.set()
@@ -1395,8 +1354,41 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
+    # لغو تسک پس‌زمینه تاخیری از طریق دکمه اختصاصی
+    if data.startswith("mobin_cancel_bg_"):
+        task_id = data[len("mobin_cancel_bg_"):]
+        if task_id in _bg_tasks:
+            _bg_tasks[task_id]["cancel_event"].set()
+            await q.answer("🛑 دستور لغو عملیات ارسال شد.", show_alert=True)
+        else:
+            await q.answer("⚠️ این عملیات قبلاً به پایان رسیده است.", show_alert=True)
+        await _send_main_menu(update, context)
+        return MOBIN_ROOT
+
+    # مشاهده لیست تسک‌های در حال اجرا در پس‌زمینه
+    if data == "mobin_list_bg_tasks":
+        if not _bg_tasks:
+            await q.message.edit_text(
+                "ℹ️ در حال حاضر هیچ عملیات تاخیری در حال اجرایی وجود ندارد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+                ]),
+            )
+            return MOBIN_ROOT
+
+        kb = []
+        lines = ["⏳ <b>عملیات‌های در حال اجرا در پس‌زمینه:</b>\n"]
+        for tid, tinfo in list(_bg_tasks.items()):
+            label = tinfo.get("label", "ری‌اکشن")
+            count = tinfo.get("count", 0)
+            lines.append(f"• <b>{label}</b> روی {count} سشن (کد: <code>{tid[-4:]}</code>)")
+            kb.append([InlineKeyboardButton(f"🛑 لغو: {label} ({tid[-4:]})", callback_data=f"mobin_cancel_bg_{tid}")])
+
+        kb.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")])
+        await q.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        return MOBIN_ROOT
+
     if data == "mobin_close":
-        _cancel_active_task(user_id)
         context.user_data.pop("mobin_authenticated", None)
         _clear_mobin_user_data(context, keep_auth=False)
         try:
@@ -1432,27 +1424,21 @@ async def mobin_cb(update: Update, context):
             f"✅ سشن‌های سالم و فعال: <b>{res['active']}</b>",
         ]
         if res["revoked"]:
-            report_lines.append(
-                f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
+            report_lines.append(f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
             for name in res["revoked"][:6]:
                 report_lines.append(f"  • <code>{name}</code>")
             if len(res["revoked"]) > 6:
-                report_lines.append(
-                    f"  ... و {len(res['revoked']) - 6} مورد دیگر")
+                report_lines.append(f"  ... و {len(res['revoked']) - 6} مورد دیگر")
 
         if res["duplicates"]:
-            report_lines.append(
-                f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
+            report_lines.append(f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
             for dup_name, orig_name, uid in res["duplicates"][:6]:
-                report_lines.append(
-                    f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
+                report_lines.append(f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
             if len(res["duplicates"]) > 6:
-                report_lines.append(
-                    f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
+                report_lines.append(f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
 
         if not res["revoked"] and not res["duplicates"]:
-            report_lines.append(
-                "\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
+            report_lines.append("\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
 
         try:
             await prog.edit_text("\n".join(report_lines), parse_mode="HTML", reply_markup=_main_kb())
@@ -1551,8 +1537,7 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 هیچ سشنی موجود نیست.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1565,8 +1550,7 @@ async def mobin_cb(update: Update, context):
         for name in names[:30]:
             uid = await _session_user_id(name)
             uid_str = str(uid) if uid else "نامعتبر/غیرمجاز"
-            lines.append(
-                f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
+            lines.append(f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
         if len(names) > 30:
             lines.append(f"\n... و {len(names) - 30} تای دیگر")
 
@@ -1600,8 +1584,7 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 همه سشن‌ها حذف شدند.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        "🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1676,10 +1659,10 @@ async def _start_reaction_scan(update, context, peer, msg_id, forward_info):
         await msg.reply_text("⚠️ هیچ سشن فعالی موجود نیست.", reply_markup=_cancel_inline_kb())
         return MOBIN_REACTION_WAITING_TARGET
 
-    emojis = await _get_channel_reactions(peer_str=peer, forward_info=forward_info)
+    emojis = await _get_channel_reactions(peer_str=peer, msg_id=msg_id, forward_info=forward_info)
     if not emojis:
         await msg.reply_text(
-            "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است یا ربات نتوانست به آن دسترسی پیدا کند.",
+            "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده و روی این پست هم ری‌اکشنی وجود ندارد.",
             reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_TARGET
@@ -1727,7 +1710,7 @@ async def _start_reaction_scan(update, context, peer, msg_id, forward_info):
 
     await progress_msg.edit_text(
         f"{report}\n\n"
-        f"🎭 یک ایموجی مجاز انتخاب کنید ({len(emojis)} مورد):\n"
+        f"🎭 یک ایموجی انتخاب کنید ({len(emojis)} مورد مجاز/فعال):\n"
         f"<i>ری‌اکشن جدید فقط روی {no_react_count} سشن آزاد تأییدشده اعمال می‌شود.{extra_note}</i>",
         parse_mode="HTML",
         reply_markup=_emoji_kb(emojis),
@@ -1807,8 +1790,7 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
             f"ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد — موردی برای حذف نیست.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔙 بازگشت به پنل", callback_data="mobin_back")]
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
             ]),
         )
         return MOBIN_ROOT
@@ -1924,44 +1906,67 @@ async def mobin_rx_count(update: Update, context):
         return MOBIN_ROOT
 
     actual_count = len(selected)
-    user_id = update.effective_user.id
-
-    # اگر قبلاً یک task تأخیری برای این کاربر در حال اجراست، لغو کن
-    _cancel_active_task(user_id)
 
     # ==========================================
-    # حالت تاخیری → task پس‌زمینه
+    # حالت تاخیری (NON-BLOCKING + CANCELLABLE)
     # ==========================================
     if delay_mode == "delayed" and delay_seconds > 0 and actual_count > 0:
+        tasks: list[tuple[str, str | None, list[str] | None]] = []
+        for s in selected:
+            if keep_emojis_per_session is not None:
+                tasks.append((s, None, keep_emojis_per_session.get(s, [])))
+            else:
+                tasks.append((s, emoji_to_send, None))
+
+        delays = _split_delays(delay_seconds, actual_count)
+        scheduled = list(zip(tasks, delays))
+        random.shuffle(scheduled)
+
+        task_id = f"task_{int(time.time())}_{random.randint(100, 999)}"
+        bg_cancel_event = asyncio.Event()
+
         status_msg = await update.message.reply_text(
-            f"🚀 <b>حالت تاخیری</b>\n"
-            f"📊 {actual_count} سشن در <b>{delay_seconds:g}</b> ثانیه پخش می‌شوند...\n"
-            f"<i>برای لغو، دکمه «❌ لغو» را بزنید یا /cancel ارسال کنید.</i>",
+            f"🚀 <b>عملیات تاخیری در پس‌زمینه آغاز شد</b>\n"
+            f"📊 تعداد سشن: <b>{actual_count}</b>\n"
+            f"⏱ زمان پخش: <b>{delay_seconds:g}</b> ثانیه\n"
+            f"🎯 عملیات: <b>{action_label}</b>\n\n"
+            f"<i>ربات کاملاً آزاد است. می‌توانید منوی اصلی را ببینید، سفارش دیگری ثبت کنید یا این عملیات را لغو نمایید.</i>",
             parse_mode="HTML",
-            reply_markup=_cancel_inline_kb(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛑 لغو این عملیات تاخیری", callback_data=f"mobin_cancel_bg_{task_id}")],
+                [InlineKeyboardButton("🎛 بازگشت به منوی اصلی", callback_data="mobin_back")],
+            ])
         )
 
-        task = asyncio.create_task(
-            _run_delayed_reaction_task(
-                bot=context.bot,
-                user_id=user_id,
-                chat_id=update.effective_chat.id,
-                status_msg_id=status_msg.message_id,
-                selected=selected,
-                keep_emojis_per_session=keep_emojis_per_session,
-                emoji_to_send=emoji_to_send,
+        used_stats = {
+            "is_remove": is_remove,
+            "no_react": used_no_reaction,
+            "unknown": used_unknown,
+            "with_react": used_with_reaction,
+        }
+
+        bg_task = asyncio.create_task(
+            _background_delayed_runner(
+                task_id=task_id,
+                status_msg=status_msg,
+                scheduled_tasks=scheduled,
                 peer=peer,
                 msg_id=msg_id,
                 fwd_info=fwd_info,
-                delay_seconds=delay_seconds,
-                is_remove=is_remove,
                 action_label=action_label,
-                used_no_reaction=used_no_reaction,
-                used_unknown=used_unknown,
-                used_with_reaction=used_with_reaction,
+                delay_seconds=delay_seconds,
+                used_stats=used_stats,
+                cancel_event=bg_cancel_event,
             )
         )
-        _mobin_ctx["active_delayed_tasks"][user_id] = task
+
+        _bg_tasks[task_id] = {
+            "cancel_event": bg_cancel_event,
+            "task": bg_task,
+            "status_msg": status_msg,
+            "label": action_label,
+            "count": actual_count,
+        }
 
         _clear_mobin_user_data(context, keep_auth=True)
         return MOBIN_ROOT
@@ -2139,9 +2144,6 @@ async def mobin_add_sessions_zip(update: Update, context):
 
 
 async def mobin_cancel(update: Update, context):
-    user_id = update.effective_user.id
-    _cancel_active_task(user_id)
-
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
         ev.set()
