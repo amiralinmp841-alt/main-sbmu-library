@@ -46,13 +46,14 @@ DEFAULT_PASSWORD = "من مبینم"
     MOBIN_ROOT,
     MOBIN_WAITING_PASSWORD,
     MOBIN_WAITING_NEW_PASSWORD,
-    MOBIN_REACTION_WAITING_LINK,
-    MOBIN_REACTION_WAITING_EMOJI,
+    MOBIN_REACTION_WAITING_TARGET,
+    MOBIN_REACTION_WAITING_EMOJI,       # دیگر استفاده نمی‌شود (ایموجی اینلاین شد)
     MOBIN_REACTION_WAITING_ACCOUNTS,
     MOBIN_WAITING_IMPORT_ZIP,
     MOBIN_WAITING_ADD_SESSION_ZIP,
     MOBIN_SESSIONS_MANAGER,
-) = range(100, 109)
+    MOBIN_REACTION_WAITING_REMOVE,
+) = range(100, 110)
 
 # ---------- GLOBAL CONTEXT ----------
 _mobin_ctx = {
@@ -149,7 +150,6 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 def _existing_session_hashes() -> set[str]:
-    """مجموعه hash محتوای همه session های موجود روی دیسک."""
     hashes: set[str] = set()
     if not os.path.isdir(MOBIN_SESSIONS_DIR):
         return hashes
@@ -164,7 +164,6 @@ def _existing_session_hashes() -> set[str]:
     return hashes
 
 def _next_session_name() -> str:
-    """اسم خودکار بعدی برای session جدید — بالاترین شماره موجود + 1."""
     existing = set(list_sessions())
     i = 1
     while True:
@@ -174,25 +173,16 @@ def _next_session_name() -> str:
         i += 1
 
 def import_sessions_zip(raw_bytes: bytes) -> dict:
-    """
-    ZIP را باز می‌کند و session ها را **مستقل از اسم فایل** وارد می‌کند.
-
-    - اسم فایل داخل ZIP اصلاً مهم نیست (هر اسمی باشه، خودش اسم می‌ده)
-    - برای هر session، محتوا (SHA256) چک می‌شه:
-        * اگه با session موجود یکسان بود  → skip
-        * اگه با session دیگه‌ای در همین ZIP یکسان بود → skip
-    - اسم جدید: acc_0001, acc_0002, ...
-    """
-    imported: list[tuple[str, str]] = []   # (new_name, original_zip_name)
-    skipped_existing: list[tuple[str, str]] = []  # (zip_name, reason)
-    skipped_duplicate_in_zip: list[tuple[str, str]] = []  # (zip_name, first_zip_name)
+    imported: list[tuple[str, str]] = []
+    skipped_existing: list[tuple[str, str]] = []
+    skipped_duplicate_in_zip: list[tuple[str, str]] = []
     errors: list[str] = []
 
     if not os.path.isdir(MOBIN_SESSIONS_DIR):
         os.makedirs(MOBIN_SESSIONS_DIR, exist_ok=True)
 
     existing_hashes = _existing_session_hashes()
-    seen_in_zip: dict[str, str] = {}   # hash → first zip entry
+    seen_in_zip: dict[str, str] = {}
 
     try:
         with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
@@ -200,7 +190,6 @@ def import_sessions_zip(raw_bytes: bytes) -> dict:
                 base = os.path.basename(entry)
                 if not base.endswith(".session") or base.startswith("."):
                     continue
-
                 try:
                     data = zf.read(entry)
                 except Exception as e:
@@ -209,18 +198,14 @@ def import_sessions_zip(raw_bytes: bytes) -> dict:
 
                 content_hash = _sha256_bytes(data)
 
-                # ۱) تکراری با session موجود (اکانت تکراری)
                 if content_hash in existing_hashes:
                     skipped_existing.append((base, "session از قبل موجود است"))
                     continue
-
-                # ۲) تکراری داخل خود ZIP
                 if content_hash in seen_in_zip:
                     skipped_duplicate_in_zip.append((base, seen_in_zip[content_hash]))
                     continue
                 seen_in_zip[content_hash] = base
 
-                # ۳) اسم جدید بذار
                 new_name = _next_session_name()
                 final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{new_name}.session")
                 try:
@@ -230,19 +215,12 @@ def import_sessions_zip(raw_bytes: bytes) -> dict:
                     existing_hashes.add(content_hash)
                 except Exception as e:
                     errors.append(f"{base}: نوشتن خطا ({e})")
-
     except zipfile.BadZipFile as e:
-        return {
-            "imported": [], "skipped_existing": [],
-            "skipped_duplicate_in_zip": [],
-            "errors": [f"ZIP معیوب: {e}"],
-        }
+        return {"imported": [], "skipped_existing": [],
+                "skipped_duplicate_in_zip": [], "errors": [f"ZIP معیوب: {e}"]}
     except Exception as e:
-        return {
-            "imported": [], "skipped_existing": [],
-            "skipped_duplicate_in_zip": [],
-            "errors": [f"خطای کلی: {e}"],
-        }
+        return {"imported": [], "skipped_existing": [],
+                "skipped_duplicate_in_zip": [], "errors": [f"خطای کلی: {e}"]}
 
     return {
         "imported": imported,
@@ -263,22 +241,18 @@ def _format_import_report(result: dict) -> str:
             lines.append(f"  • <code>{new_name}</code> ← <code>{old_name}</code>")
         if len(imported) > 8:
             lines.append(f"  ... و {len(imported) - 8} تای دیگر")
-
     if skipped_existing:
         lines.append(f"\n🆔 رد شد (session از قبل موجود): {len(skipped_existing)}")
         for name, _ in skipped_existing[:5]:
             lines.append(f"  • <code>{name}</code>")
-
     if skipped_dup:
         lines.append(f"\n🔁 رد شد (تکراری داخل ZIP): {len(skipped_dup)}")
         for name, first in skipped_dup[:5]:
             lines.append(f"  • <code>{name}</code> (همان {first})")
-
     if errors:
         lines.append(f"\n⚠️ خطاها: {len(errors)}")
         for err in errors[:5]:
             lines.append(f"  • {err}")
-
     return "\n".join(lines)
 
 # =========================================================
@@ -308,11 +282,8 @@ def _upload_backup_sync():
         raw = _build_backup_zip()
         with open(MOBIN_BACKUP_ZIP, "wb") as f:
             f.write(raw)
-        uploader(
-            chat_id,
-            MOBIN_BACKUP_ZIP,
-            f"mobin_backup.zip ({len(list_sessions())} sessions)",
-        )
+        uploader(chat_id, MOBIN_BACKUP_ZIP,
+                 f"mobin_backup.zip ({len(list_sessions())} sessions)")
         mobin_logger.info("✅ mobin backup uploaded")
     except Exception as e:
         mobin_logger.error(f"mobin backup upload failed: {e}")
@@ -332,10 +303,7 @@ def restore_mobin_from_telegram() -> bool:
             return False
         with open(MOBIN_RESTORE_ZIP, "rb") as f:
             raw = f.read()
-
         result = import_sessions_zip(raw)
-        if result["errors"]:
-            mobin_logger.warning(f"restore mobin errors: {result['errors'][:5]}")
         mobin_logger.info(
             f"✅ mobin restored — imported={len(result['imported'])}, "
             f"skipped_existing={len(result['skipped_existing'])}, "
@@ -347,9 +315,71 @@ def restore_mobin_from_telegram() -> bool:
         return False
 
 # =========================================================
-# REACTION
+# REACTION TARGET PARSING
 # =========================================================
-async def _react_one_session(session_name: str, target: str, emoji: str) -> dict:
+def _parse_target_from_text(text: str):
+    """
+    از یک متن (لینک یا @username) target رو استخراج می‌کنه.
+    Returns: (peer_str_or_id, msg_id)  یا (None, None) اگه نامعتبر بود.
+    """
+    t = text.strip()
+    msg_id = 0
+    if "/t.me/" in t or "t.me/" in t:
+        parts = [p for p in t.rstrip("/").split("/") if p]
+        last = parts[-1]
+        if last.isdigit():
+            msg_id = int(last)
+            peer = parts[-2]
+        else:
+            peer = last
+        return peer, msg_id
+    if t.startswith("@"):
+        return t[1:], 0
+    if t.startswith("https://") or t.startswith("http://"):
+        # سعی کن آخریش رو بگیری
+        parts = [p for p in t.rstrip("/").split("/") if p]
+        if parts:
+            last = parts[-1]
+            if last.isdigit():
+                msg_id = int(last)
+                peer = parts[-2]
+            else:
+                peer = last
+            return peer, msg_id
+    # اگر عدد بود -> فرض کن channel_id هست (نمیشه راحت resolve کرد)
+    return None, None
+
+def _extract_forward_info(message) -> dict | None:
+    """
+    اگه message فوروارد شده باشه، chat_id و message_id رو برمی‌گردونه.
+    Returns: {"chat_id": int, "message_id": int} یا None
+    """
+    if not message:
+        return None
+    # forward_from_chat + forward_from_message_id
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    fwd_msg_id = getattr(message, "forward_from_message_id", None)
+    if fwd_chat is not None and fwd_msg_id:
+        return {"chat_id": fwd_chat.id, "message_id": int(fwd_msg_id)}
+    # forward_origin (API جدید)
+    fwd_origin = getattr(message, "forward_origin", None)
+    if fwd_origin is not None:
+        origin_chat = getattr(fwd_origin, "chat", None)
+        origin_msg_id = getattr(fwd_origin, "message_id", None)
+        if origin_chat is not None and origin_msg_id:
+            return {"chat_id": origin_chat.id, "message_id": int(origin_msg_id)}
+    return None
+
+# =========================================================
+# REACTION (single session)
+# =========================================================
+async def _react_one_session(
+    session_name: str,
+    peer_str: str | None,
+    msg_id: int,
+    emoji: str | None,          # None => برداشتن ری‌اکشن
+    forward_info: dict | None = None,
+) -> dict:
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
@@ -363,39 +393,37 @@ async def _react_one_session(session_name: str, target: str, emoji: str) -> dict
         if not await client.is_user_authorized():
             return {"ok": False, "reason": "unauthorized"}
 
-        channel = target.strip()
-        msg_id = 0
-        if "/t.me/" in channel or "t.me/" in channel:
-            parts = [p for p in channel.rstrip("/").split("/") if p]
-            last = parts[-1]
-            if last.isdigit():
-                msg_id = int(last)
-                channel = parts[-2]
+        # تعیین entity و msg_id
+        if forward_info:
+            # از روی فوروارد: chat_id عددی
+            try:
+                entity = await client.get_entity(forward_info["chat_id"])
+            except Exception as e:
+                return {"ok": False, "reason": f"forward entity: {e}"}
+            target_msg_id = forward_info["message_id"]
+        else:
+            if not peer_str:
+                return {"ok": False, "reason": "no target"}
+            entity = await client.get_entity(peer_str)
+            if msg_id:
+                target_msg_id = msg_id
             else:
-                channel = last
-        channel = channel.lstrip("@")
+                # آخرین پیام کانال
+                msgs = await client.get_messages(entity, limit=1)
+                if not msgs:
+                    return {"ok": False, "reason": "no message"}
+                target_msg_id = msgs[0].id
 
-        entity = await client.get_entity(channel)
-        msgs = (
-            await client.get_messages(entity, ids=[msg_id])
-            if msg_id
-            else await client.get_messages(entity, limit=1)
-        )
-        if not isinstance(msgs, list):
-            msgs = [msgs]
-
-        for m in msgs:
-            if m:
-                try:
-                    await client(SendReactionRequest(
-                        peer=entity,
-                        msg_id=m.id,
-                        reaction=[ReactionEmoji(emoticon=emoji)],
-                    ))
-                    return {"ok": True, "reason": None}
-                except Exception as e:
-                    return {"ok": False, "reason": str(e)}
-        return {"ok": False, "reason": "no message"}
+        reaction_list = [] if not emoji else [ReactionEmoji(emoticon=emoji)]
+        try:
+            await client(SendReactionRequest(
+                peer=entity,
+                msg_id=target_msg_id,
+                reaction=reaction_list,
+            ))
+            return {"ok": True, "reason": None}
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
     except Exception as e:
         return {"ok": False, "reason": str(e)}
     finally:
@@ -411,6 +439,7 @@ def _main_kb() -> InlineKeyboardMarkup:
     n = len(list_sessions())
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
+        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن", callback_data="mobin_remove_reaction")],
         [InlineKeyboardButton(f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
         [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
         [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
@@ -421,6 +450,25 @@ def _main_kb() -> InlineKeyboardMarkup:
 
 def _cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
+
+# ایموجی‌های مجاز برای ری‌اکشن (اینلاین)
+_EMOJI_CHOICES = [
+    "❤️", "🔥", "👍", "👎", "😂", "😢", "😮", "😡",
+    "🎉", "💯", "⚡", "👏", "🤔", "🙏", "👌", "💔",
+    "🌚", "🌭", "🍾", "💊", "🙈", "😍", "🤯", "🤬",
+]
+
+def _emoji_kb() -> InlineKeyboardMarkup:
+    kb, row = [], []
+    for e in _EMOJI_CHOICES:
+        row.append(InlineKeyboardButton(e, callback_data=f"mobin_em_{e}"))
+        if len(row) == 4:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")])
+    return InlineKeyboardMarkup(kb)
 
 def _sessions_kb() -> InlineKeyboardMarkup:
     names = list_sessions()
@@ -445,6 +493,21 @@ def _is_admin(user_id) -> bool:
 
 def _is_password_ok(text: str) -> bool:
     return text.strip() == load_mobin_data().get("password", DEFAULT_PASSWORD)
+
+async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین</b>"):
+    """ارسال منوی اصلی — چه با edit چه با reply."""
+    if update.callback_query and update.callback_query.message:
+        try:
+            await update.callback_query.message.edit_text(
+                text, parse_mode="HTML", reply_markup=_main_kb(),
+            )
+            return
+        except Exception:
+            pass
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            text, parse_mode="HTML", reply_markup=_main_kb(),
+        )
 
 # =========================================================
 # HANDLERS
@@ -492,6 +555,7 @@ async def mobin_cb(update: Update, context):
         await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return MOBIN_ROOT
 
+    # ---- بستن ----
     if data == "mobin_close":
         context.user_data.pop("mobin_authenticated", None)
         try:
@@ -501,14 +565,12 @@ async def mobin_cb(update: Update, context):
         await q.message.reply_text("پنل بسته شد.")
         return ConversationHandler.END
 
+    # ---- بازگشت به پنل ----
     if data == "mobin_back":
-        await q.message.edit_text(
-            "🎛 <b>پنل مبین</b>",
-            parse_mode="HTML",
-            reply_markup=_main_kb(),
-        )
+        await _send_main_menu(update, context)
         return MOBIN_ROOT
 
+    # ---- ری‌اکشن فیک (شروع) ----
     if data == "mobin_reaction":
         sessions = list_sessions()
         if not sessions:
@@ -520,12 +582,46 @@ async def mobin_cb(update: Update, context):
         await q.message.reply_text(
             f"⚡ <b>ری‌اکشن فیک</b>\n\n"
             f"🔋 {len(sessions)} سشن موجود\n\n"
-            f"لینک پست/کانال را ارسال کنید:",
+            "روش ارسال هدف:\n"
+            "• <b>لینک پست</b> (مثل <code>https://t.me/chan/123</code>)\n"
+            "• <b>@username</b> کانال (آخرین پست)\n"
+            "• <b>فوروارد/کپی</b> کردن پست از کانال به اینجا\n\n"
+            "برای انصراف «❌ لغو» را بفرستید.",
             parse_mode="HTML",
             reply_markup=_cancel_kb(),
         )
-        return MOBIN_REACTION_WAITING_LINK
+        return MOBIN_REACTION_WAITING_TARGET
 
+    # ---- برداشتن ری‌اکشن (شروع) ----
+    if data == "mobin_remove_reaction":
+        sessions = list_sessions()
+        if not sessions:
+            await q.message.reply_text("⚠️ هیچ سشن فعالی موجود نیست.")
+            return MOBIN_ROOT
+        await q.message.reply_text(
+            f"🚫 <b>برداشتن ری‌اکشن</b>\n\n"
+            f"🔋 {len(sessions)} سشن موجود\n\n"
+            "لینک پست را بفرستید یا پست را فوروارد/کپی کنید.",
+            parse_mode="HTML",
+            reply_markup=_cancel_kb(),
+        )
+        return MOBIN_REACTION_WAITING_REMOVE
+
+    # ---- انتخاب ایموجی از اینلاین ----
+    if data.startswith("mobin_em_"):
+        emoji = data[len("mobin_em_"):]
+        context.user_data["mobin_rx_emoji"] = emoji
+        n = len(list_sessions())
+        await q.message.edit_text(
+            f"🎭 ایموجی انتخابی: {emoji}\n\n"
+            f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            ]),
+        )
+        return MOBIN_REACTION_WAITING_ACCOUNTS
+
+    # ---- اضافه کردن سشن ----
     if data == "mobin_add_sessions":
         await q.message.reply_text(
             "📥 ZIP حاوی فایل‌های <code>.session</code> را ارسال کنید.\n\n"
@@ -540,6 +636,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_WAITING_ADD_SESSION_ZIP
 
+    # ---- لیست سشن‌ها ----
     if data == "mobin_sessions_list":
         names = list_sessions()
         if not names:
@@ -558,6 +655,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
+    # ---- حذف همه ----
     if data == "mobin_del_all_sessions":
         count = delete_all_sessions()
         _schedule_backup_upload()
@@ -569,6 +667,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
+    # ---- حذف یک سشن ----
     if data.startswith("mobin_del_session_"):
         name = data[len("mobin_del_session_"):]
         if delete_session(name):
@@ -592,6 +691,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_SESSIONS_MANAGER
 
+    # ---- دریافت بکاپ ----
     if data == "mobin_backup_get":
         raw = _build_backup_zip()
         await q.message.reply_document(
@@ -603,6 +703,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
+    # ---- وارد کردن بکاپ ----
     if data == "mobin_backup_import":
         await q.message.reply_text(
             "📥 فایل ZIP بکاپ را ارسال کنید:",
@@ -610,6 +711,7 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_WAITING_IMPORT_ZIP
 
+    # ---- تغییر رمز ----
     if data == "mobin_change_password":
         await q.message.reply_text(
             "🔑 رمز جدید (حداقل ۳ کاراکتر):",
@@ -619,33 +721,91 @@ async def mobin_cb(update: Update, context):
 
     return MOBIN_ROOT
 
-# ---------- ری‌اکشن ----------
-async def mobin_rx_link(update: Update, context):
-    text = (update.message.text or "").strip()
+# ---------- هدف ری‌اکشن: لینک یا فوروارد ----------
+async def mobin_rx_target(update: Update, context):
+    msg = update.message
+    text = (msg.text or "").strip()
+
+    # ---- لغو ----
     if text == "❌ لغو":
-        await update.message.reply_text("لغو شد.", reply_markup=_main_kb())
+        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
         return MOBIN_ROOT
-    context.user_data["mobin_rx_target"] = text
-    await update.message.reply_text("🎭 ایموجی ری‌اکشن را ارسال کنید (مثل ❤️):")
+
+    # ---- فوروارد / کپی ----
+    fwd = _extract_forward_info(msg)
+    if fwd:
+        context.user_data["mobin_forward_info"] = fwd
+        context.user_data["mobin_rx_peer"] = None
+        context.user_data["mobin_rx_msg_id"] = 0
+        # برو به انتخاب ایموجی
+        await msg.reply_text(
+            "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
+            reply_markup=_emoji_kb(),
+        )
+        return MOBIN_REACTION_WAITING_EMOJI
+
+    # ---- لینک یا @username ----
+    peer, msg_id = _parse_target_from_text(text)
+    if not peer:
+        await msg.reply_text(
+            "❌ نتوانستم هدف را تشخیص بدم.\n"
+            "لینک بفرست (مثل <code>https://t.me/chan/123</code>)، "
+            "یا @username، یا پست را فوروارد کن.",
+            parse_mode="HTML",
+        )
+        return MOBIN_REACTION_WAITING_TARGET
+
+    context.user_data["mobin_rx_peer"] = peer
+    context.user_data["mobin_rx_msg_id"] = msg_id
+    context.user_data["mobin_forward_info"] = None
+
+    await msg.reply_text(
+        "🎭 ایموجی ری‌اکشن را انتخاب کنید:",
+        reply_markup=_emoji_kb(),
+    )
     return MOBIN_REACTION_WAITING_EMOJI
 
-async def mobin_rx_emoji(update: Update, context):
-    text = (update.message.text or "").strip()
+# ---------- برداشتن ری‌اکشن: هدف ----------
+async def mobin_remove_target(update: Update, context):
+    msg = update.message
+    text = (msg.text or "").strip()
+
     if text == "❌ لغو":
-        await update.message.reply_text("لغو شد.", reply_markup=_main_kb())
+        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
         return MOBIN_ROOT
-    context.user_data["mobin_rx_emoji"] = text
-    n = len(list_sessions())
-    await update.message.reply_text(
-        f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
-        f"⚠️ توصیه: بیش از ۵ تا در هر بار نزنید."
+
+    fwd = _extract_forward_info(msg)
+    if fwd:
+        context.user_data["mobin_forward_info"] = fwd
+        context.user_data["mobin_rx_peer"] = None
+        context.user_data["mobin_rx_msg_id"] = 0
+        await msg.reply_text(
+            f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):",
+        )
+        return MOBIN_REACTION_WAITING_ACCOUNTS
+
+    peer, msg_id = _parse_target_from_text(text)
+    if not peer:
+        await msg.reply_text(
+            "❌ نتوانستم هدف را تشخیص بدم.\n"
+            "لینک بفرست یا پست را فوروارد کن.",
+        )
+        return MOBIN_REACTION_WAITING_REMOVE
+
+    context.user_data["mobin_rx_peer"] = peer
+    context.user_data["mobin_rx_msg_id"] = msg_id
+    context.user_data["mobin_forward_info"] = None
+
+    await msg.reply_text(
+        f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):",
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
 
+# ---------- تعداد سشن‌ها -> اجرا ----------
 async def mobin_rx_count(update: Update, context):
     text = (update.message.text or "").strip()
     if text == "❌ لغو":
-        await update.message.reply_text("لغو شد.", reply_markup=_main_kb())
+        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
         return MOBIN_ROOT
     if not text.isdigit() or int(text) <= 0:
         await update.message.reply_text("❌ عدد معتبر وارد کنید.")
@@ -654,12 +814,15 @@ async def mobin_rx_count(update: Update, context):
     count = int(text)
     sessions = list_sessions()
     count = min(count, len(sessions), 10)
-    target = context.user_data.get("mobin_rx_target")
-    emoji = context.user_data.get("mobin_rx_emoji")
 
+    peer = context.user_data.get("mobin_rx_peer")
+    msg_id = context.user_data.get("mobin_rx_msg_id", 0)
+    emoji = context.user_data.get("mobin_rx_emoji")   # None => برداشتن
+    fwd_info = context.user_data.get("mobin_forward_info")
+
+    action_label = "برداشتن ری‌اکشن" if not emoji else f"ری‌اکشن {emoji}"
     status_msg = await update.message.reply_text(
-        f"🚀 در حال اجرا روی {count} سشن...\n"
-        f"🎯 {target}\n🎭 {emoji}"
+        f"🚀 در حال اجرا ({action_label}) روی {count} سشن...\n"
     )
 
     ok_total = 0
@@ -668,7 +831,7 @@ async def mobin_rx_count(update: Update, context):
     for i in range(0, len(selected), 3):
         batch = selected[i:i+3]
         results = await asyncio.gather(
-            *[_react_one_session(s, target, emoji) for s in batch],
+            *[_react_one_session(s, peer, msg_id, emoji, fwd_info) for s in batch],
             return_exceptions=True,
         )
         for s, r in zip(batch, results):
@@ -688,15 +851,19 @@ async def mobin_rx_count(update: Update, context):
     except Exception:
         await update.message.reply_text(summary, parse_mode="HTML")
 
-    context.user_data.pop("mobin_rx_target", None)
-    context.user_data.pop("mobin_rx_emoji", None)
+    # پاک‌سازی state
+    for k in ["mobin_rx_peer", "mobin_rx_msg_id", "mobin_rx_emoji", "mobin_forward_info"]:
+        context.user_data.pop(k, None)
+
+    # برگرد به پنل
+    await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
     return MOBIN_ROOT
 
 # ---------- تغییر رمز ----------
 async def mobin_new_password(update: Update, context):
     text = (update.message.text or "").strip()
     if text == "❌ لغو":
-        await update.message.reply_text("لغو شد.", reply_markup=_main_kb())
+        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
         return MOBIN_ROOT
     if len(text) < 3:
         await update.message.reply_text("❌ خیلی کوتاه است.")
@@ -781,6 +948,7 @@ async def mobin_add_sessions_zip(update: Update, context):
         await status.edit_text(
             f"📊 مجموع: {total} سشن\n\n{report}",
             parse_mode="HTML",
+            reply_markup=_main_kb(),
         )
     except Exception:
         await update.message.reply_text(
@@ -813,11 +981,23 @@ def build_mobin_handler():
             MOBIN_SESSIONS_MANAGER: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
-            MOBIN_REACTION_WAITING_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_link),
+            MOBIN_REACTION_WAITING_TARGET: [
+                # لینک/متن یا فوروارد
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    mobin_rx_target,
+                ),
+                MessageHandler(filters.FORWARDED, mobin_rx_target),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_emoji),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
+            ],
+            MOBIN_REACTION_WAITING_REMOVE: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    mobin_remove_target,
+                ),
+                MessageHandler(filters.FORWARDED, mobin_remove_target),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
