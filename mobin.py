@@ -32,6 +32,7 @@ from telegram.ext import (
 from telethon import TelegramClient, functions
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
+from telethon.tl.functions.messages import GetMessageReactionsListRequest
 
 mobin_logger = logging.getLogger("mobin")
 mobin_logger.setLevel(logging.INFO)
@@ -569,8 +570,9 @@ async def _get_my_reaction_status(
     forward_info: dict | None = None,
 ) -> dict:
     """
-    بررسی وضعیت ری‌اکشن یک سشن روی پیام هدف.
-    خروجی: {"ok": bool, "has_reaction": bool, "emojis": list[str], "reason": str|None}
+    بررسی وضعیت ری‌اکشن یک سشن روی پیام هدف — دقیق.
+    از GetMessageReactionsListRequest استفاده می‌کنه و فقط ری‌اکشنی که
+    خود این سشن زده رو برمی‌گردونه (نه aggregate).
     """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
@@ -584,6 +586,11 @@ async def _get_my_reaction_status(
         await client.connect()
         if not await client.is_user_authorized():
             return {"ok": False, "has_reaction": False, "emojis": [], "reason": "unauthorized"}
+
+        me = await client.get_me()
+        my_uid = int(me.id) if me else None
+        if my_uid is None:
+            return {"ok": False, "has_reaction": False, "emojis": [], "reason": "no me"}
 
         if forward_info:
             try:
@@ -606,34 +613,63 @@ async def _get_my_reaction_status(
                     return {"ok": False, "has_reaction": False, "emojis": [], "reason": "no message"}
                 target_msg_id = msgs[0].id
 
+        # لیست کسانی که روی این پیام ری‌اکشن زدن
+        my_emojis: list[str] = []
+        offset = ""
         try:
-            msgs = await client.get_messages(entity, ids=[target_msg_id])
+            while True:
+                res = await client(GetMessageReactionsListRequest(
+                    peer=entity,
+                    id=target_msg_id,
+                    limit=100,
+                    offset=offset,
+                ))
+                reactions_list = getattr(res, "reactions", None) or []
+                for item in reactions_list:
+                    peer_id = getattr(item, "peer_id", None)
+                    uid = getattr(peer_id, "user_id", None) if peer_id else None
+                    if uid != my_uid:
+                        continue
+                    reaction = getattr(item, "reaction", None)
+                    if reaction is None:
+                        continue
+                    emoticon = getattr(reaction, "emoticon", None)
+                    if emoticon:
+                        my_emojis.append(emoticon)
+                    else:
+                        document_id = getattr(reaction, "document_id", None)
+                        if document_id:
+                            my_emojis.append(f"custom:{document_id}")
+                # ادامه صفحه‌بندی
+                next_offset = getattr(res, "next_offset", None)
+                if not next_offset:
+                    break
+                offset = next_offset
+                # محافظت: حداکثر ۵ صفحه
+                if len(my_emojis) > 0 and len(reactions_list) < 100:
+                    break
         except Exception as e:
-            return {"ok": False, "has_reaction": False, "emojis": [], "reason": f"get_messages: {e}"}
+            # برخی کانال‌ها (private یا خیلی بزرگ) ممکنه اجازه ندن
+            # در این حالت fallback به روش قبلی (aggregate) — ولی فقط برای تشخیص has_reaction
+            mobin_logger.debug(f"GetMessageReactionsList failed for {session_name}: {e}")
+            try:
+                msgs = await client.get_messages(entity, ids=[target_msg_id])
+                if not msgs or not msgs[0]:
+                    return {"ok": False, "has_reaction": False, "emojis": [], "reason": "message not found"}
+                reactions = getattr(msgs[0], "reactions", None)
+                if not reactions:
+                    return {"ok": True, "has_reaction": False, "emojis": [], "reason": None}
+                # نمی‌تونیم مطمئن باشیم کدوم مال این سشنه — فقط aggregate
+                return {"ok": True, "has_reaction": False, "emojis": [], "reason": None}
+            except Exception as e2:
+                return {"ok": False, "has_reaction": False, "emojis": [], "reason": f"list: {e} / fallback: {e2}"}
 
-        if not msgs or not msgs[0]:
-            return {"ok": False, "has_reaction": False, "emojis": [], "reason": "message not found"}
-
-        msg_obj = msgs[0]
-        reactions = getattr(msg_obj, "reactions", None)
-        if not reactions:
-            return {"ok": True, "has_reaction": False, "emojis": [], "reason": None}
-
-        results = getattr(reactions, "results", None) or []
-        emojis: list[str] = []
-        for r in results:
-            reaction = getattr(r, "reaction", None)
-            if reaction is None:
-                continue
-            emoticon = getattr(reaction, "emoticon", None)
-            if emoticon:
-                emojis.append(emoticon)
-            else:
-                document_id = getattr(reaction, "document_id", None)
-                if document_id:
-                    emojis.append(f"custom:{document_id}")
-
-        return {"ok": True, "has_reaction": bool(emojis), "emojis": emojis, "reason": None}
+        return {
+            "ok": True,
+            "has_reaction": bool(my_emojis),
+            "emojis": my_emojis,
+            "reason": None,
+        }
 
     except Exception as e:
         return {"ok": False, "has_reaction": False, "emojis": [], "reason": str(e)}
