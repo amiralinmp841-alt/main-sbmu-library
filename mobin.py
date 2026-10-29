@@ -199,11 +199,6 @@ async def _session_user_id(session_name: str) -> int | None:
 
 
 async def _cleanup_and_validate_sessions(progress_cb=None) -> dict:
-    """
-    بررسی همگانی سشن‌ها:
-    1. حذف سشن‌های غیرمجاز و باطل‌شده
-    2. حذف سشن‌های تکراری (یکسان بودن user_id)
-    """
     sessions = list_sessions()
     total = len(sessions)
     if total == 0:
@@ -224,7 +219,7 @@ async def _cleanup_and_validate_sessions(progress_cb=None) -> dict:
 
         for s, uid in zip(batch, results):
             done += 1
-            if not isinstance(uid, int) or uid is None:
+            if not isinstance(uid, int):
                 delete_session(s)
                 revoked.append(s)
             else:
@@ -333,10 +328,12 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
 
     for base, data, content_hash in entries:
         if content_hash in existing_hashes:
-            skipped_existing.append((base, "session از قبل موجود است (hash یکسان)"))
+            skipped_existing.append(
+                (base, "session از قبل موجود است (hash یکسان)"))
             continue
         if content_hash in seen_in_zip_hash:
-            skipped_duplicate_in_zip.append((base, seen_in_zip_hash[content_hash]))
+            skipped_duplicate_in_zip.append(
+                (base, seen_in_zip_hash[content_hash]))
             continue
 
         new_name = _next_session_name()
@@ -357,7 +354,8 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
                 except Exception:
                     pass
                 skipped_existing.append(
-                    (base, f"همون اکانت (user_id={uid}) قبلاً هست: {existing_user_ids[uid]}")
+                    (base,
+                     f"همون اکانت (user_id={uid}) قبلاً هست: {existing_user_ids[uid]}")
                 )
                 continue
             if uid in seen_in_zip_uid:
@@ -366,7 +364,8 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
                 except Exception:
                     pass
                 skipped_duplicate_in_zip.append(
-                    (base, f"همون اکانت داخل ZIP: {seen_in_zip_uid[uid]} (user_id={uid})")
+                    (base,
+                     f"همون اکانت داخل ZIP: {seen_in_zip_uid[uid]} (user_id={uid})")
                 )
                 continue
             seen_in_zip_uid[uid] = base
@@ -395,26 +394,23 @@ def _format_import_report(result: dict) -> str:
     lines = [f"✅ وارد شد: {len(imported)}"]
     if imported:
         for new_name, old_name in imported[:8]:
-            lines.append(f"  • <code>{new_name}</code> ← <code>{old_name}</code>")
+            lines.append(
+                f"  • <code>{new_name}</code> ← <code>{old_name}</code>")
         if len(imported) > 8:
             lines.append(f"  ... و {len(imported) - 8} تای دیگر")
     if skipped_existing:
-        lines.append(f"
-🆔 رد شد (از قبل موجود): {len(skipped_existing)}")
+        lines.append(f"\n🆔 رد شد (از قبل موجود): {len(skipped_existing)}")
         for name, reason in skipped_existing[:5]:
             lines.append(f"  • <code>{name}</code> — {reason}")
     if skipped_dup:
-        lines.append(f"
-🔁 رد شد (تکراری داخل ZIP): {len(skipped_dup)}")
+        lines.append(f"\n🔁 رد شد (تکراری داخل ZIP): {len(skipped_dup)}")
         for name, first in skipped_dup[:5]:
             lines.append(f"  • <code>{name}</code> (همان {first})")
     if errors:
-        lines.append(f"
-⚠️ خطاها: {len(errors)}")
+        lines.append(f"\n⚠️ خطاها: {len(errors)}")
         for err in errors[:5]:
             lines.append(f"  • {err}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # =========================================================
@@ -428,7 +424,8 @@ def _build_backup_zip() -> bytes:
         if os.path.isdir(MOBIN_SESSIONS_DIR):
             for name in os.listdir(MOBIN_SESSIONS_DIR):
                 if name.endswith(".session"):
-                    zf.write(os.path.join(MOBIN_SESSIONS_DIR, name), f"sessions/{name}")
+                    zf.write(os.path.join(MOBIN_SESSIONS_DIR, name),
+                             f"sessions/{name}")
     return buf.getvalue()
 
 
@@ -442,7 +439,8 @@ def _upload_backup_sync():
         raw = _build_backup_zip()
         with open(MOBIN_BACKUP_ZIP, "wb") as f:
             f.write(raw)
-        uploader(chat_id, MOBIN_BACKUP_ZIP, f"mobin_backup.zip ({len(list_sessions())} sessions)")
+        uploader(chat_id, MOBIN_BACKUP_ZIP,
+                 f"mobin_backup.zip ({len(list_sessions())} sessions)")
         mobin_logger.info("✅ mobin backup uploaded")
     except Exception as e:
         mobin_logger.error(f"mobin backup upload failed: {e}")
@@ -468,7 +466,8 @@ def restore_mobin_from_telegram() -> bool:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    result = ex.submit(lambda: asyncio.run(import_sessions_zip(raw))).result()
+                    result = ex.submit(lambda: asyncio.run(
+                        import_sessions_zip(raw))).result()
             else:
                 result = loop.run_until_complete(import_sessions_zip(raw))
         except RuntimeError:
@@ -499,13 +498,19 @@ async def _resolve_target_entity(client, peer_str, forward_info):
                     return await client.get_entity(PeerChannel(real_id))
             except Exception:
                 pass
-            return await client.get_input_entity(chat_id)
+            try:
+                return await client.get_input_entity(chat_id)
+            except Exception:
+                return None
 
     if peer_str:
         try:
             return await client.get_entity(peer_str)
         except Exception:
-            return await client.get_input_entity(peer_str)
+            try:
+                return await client.get_input_entity(peer_str)
+            except Exception:
+                return None
     return None
 
 
@@ -538,11 +543,13 @@ async def _get_channel_reactions(
         chat_reactions = None
         try:
             full = await client(functions.channels.GetFullChannelRequest(entity))
-            chat_reactions = getattr(full.full_chat, "available_reactions", None)
+            chat_reactions = getattr(
+                full.full_chat, "available_reactions", None)
         except Exception:
             try:
                 full = await client(functions.messages.GetFullChatRequest(entity.id))
-                chat_reactions = getattr(full.full_chat, "available_reactions", None)
+                chat_reactions = getattr(
+                    full.full_chat, "available_reactions", None)
             except Exception:
                 chat_reactions = None
 
@@ -634,14 +641,9 @@ def _parse_target_from_text(text: str):
 
 
 def _extract_forward_info(message) -> dict | None:
-    """
-    استخراج دقیق اطلاعات پیام فوروارد شده مستقیم از کانال
-    سازگار با تمام نسخه‌های python-telegram-bot
-    """
     if not message:
         return None
 
-    # بررسی ساختار جدید تلگرام بات (origin)
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
         chat = getattr(origin, "chat", None)
@@ -649,7 +651,6 @@ def _extract_forward_info(message) -> dict | None:
         if chat is not None and msg_id:
             return {"chat_id": chat.id, "message_id": int(msg_id)}
 
-    # بررسی ساختارهای سنتی PTB
     fwd_chat = getattr(message, "forward_from_chat", None)
     fwd_msg_id = getattr(message, "forward_from_message_id", None)
     if fwd_chat is not None and fwd_msg_id:
@@ -678,7 +679,6 @@ async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
 
     my_reactions = []
 
-    # 1. خواندن فلگ انتخابی کلاینت
     results = getattr(reactions, "results", None) or []
     for rc in results:
         is_chosen = (
@@ -695,7 +695,6 @@ async def _get_my_reactions_raw(client, entity, target_msg_id, my_uid):
         my_reactions.sort(key=lambda x: x[0])
         return [r[1] for r in my_reactions], True
 
-    # 2. بررسی تکمیلی recent_reactions
     recent = getattr(reactions, "recent_reactions", None) or []
     for item in recent:
         peer_id = getattr(item, "peer_id", None)
@@ -818,7 +817,8 @@ async def _scan_all_sessions_reactions(
             break
         batch = sessions[i:i + MAX_PARALLEL_CHECKS]
         results = await asyncio.gather(
-            *[_get_my_reaction_status(s, peer_str, msg_id, forward_info) for s in batch],
+            *[_get_my_reaction_status(s, peer_str, msg_id, forward_info)
+              for s in batch],
             return_exceptions=True,
         )
         for s, r in zip(batch, results):
@@ -876,13 +876,13 @@ def _format_scan_report(scan: dict, is_remove: bool) -> str:
     if unknown:
         lines.append(f"• 🟡 {unknown} سشن وضعیت نامشخص")
     if not is_remove:
-        lines.append("
-<i>برای جلوگیری از ری‌اکشن تکراری، فقط از سشن‌های 🟢 آزاد استفاده می‌شود.</i>")
+        lines.append(
+            "\n<i>برای جلوگیری از ری‌اکشن تکراری، فقط از سشن‌های 🟢 آزاد استفاده می‌شود.</i>")
 
     if scan["emoji_counts"]:
-        lines.append("
-🎭 <b>ایموجی‌های سشن‌های تأییدشده:</b>")
-        sorted_emojis = sorted(scan["emoji_counts"].items(), key=lambda x: -x[1])
+        lines.append("\n🎭 <b>ایموجی‌های سشن‌های تأییدشده:</b>")
+        sorted_emojis = sorted(
+            scan["emoji_counts"].items(), key=lambda x: -x[1])
         for emoji, cnt in sorted_emojis[:12]:
             lines.append(f"  {emoji} × <b>{cnt}</b> سشن")
         if len(sorted_emojis) > 12:
@@ -890,15 +890,12 @@ def _format_scan_report(scan: dict, is_remove: bool) -> str:
 
     if scan["custom_emoji_counts"]:
         total_custom = sum(scan["custom_emoji_counts"].values())
-        lines.append(f"
-🎨 {total_custom} ری‌اکشن از نوع custom emoji (سند)")
+        lines.append(f"\n🎨 {total_custom} ری‌اکشن از نوع custom emoji (سند)")
 
     if failed:
-        lines.append(f"
-⚠️ {failed} سشن قابل چک نبودند")
+        lines.append(f"\n⚠️ {failed} سشن قابل چک نبودند")
 
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # =========================================================
@@ -908,9 +905,13 @@ def _str_to_reaction_obj(e: str):
     if e.startswith("custom:"):
         try:
             doc_id = int(e[len("custom:"):])
+            if doc_id <= 0:
+                return None
             return ReactionCustomEmoji(document_id=doc_id)
         except (ValueError, TypeError):
             return None
+    if not e:
+        return None
     return ReactionEmoji(emoticon=e)
 
 
@@ -1013,14 +1014,22 @@ def _split_delays(total_seconds: float, n: int) -> list[float]:
 def _main_kb() -> InlineKeyboardMarkup:
     n = len(list_sessions())
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
-        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن", callback_data="mobin_remove_reaction")],
-        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها", callback_data="mobin_clean_sessions")],
-        [InlineKeyboardButton(f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
-        [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
-        [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
-        [InlineKeyboardButton("📥 وارد کردن بکاپ", callback_data="mobin_backup_import")],
-        [InlineKeyboardButton("🔑 تغییر رمز", callback_data="mobin_change_password")],
+        [InlineKeyboardButton(
+            "⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
+        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن",
+                              callback_data="mobin_remove_reaction")],
+        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها",
+                              callback_data="mobin_clean_sessions")],
+        [InlineKeyboardButton(
+            f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
+        [InlineKeyboardButton(
+            f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
+        [InlineKeyboardButton(
+            "📤 دریافت بکاپ", callback_data="mobin_backup_get")],
+        [InlineKeyboardButton("📥 وارد کردن بکاپ",
+                              callback_data="mobin_backup_import")],
+        [InlineKeyboardButton(
+            "🔑 تغییر رمز", callback_data="mobin_change_password")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="mobin_close")],
     ])
 
@@ -1034,7 +1043,8 @@ def _cancel_inline_kb() -> InlineKeyboardMarkup:
 def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
     if not emojis:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton(
+                "🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     for e in emojis[:24]:
@@ -1044,34 +1054,41 @@ def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton(
+        "❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _remove_emoji_kb(emoji_counts: dict[str, int]) -> InlineKeyboardMarkup:
     if not emoji_counts:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton(
+                "🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     sorted_emojis = sorted(emoji_counts.items(), key=lambda x: -x[1])
     for emoji, cnt in sorted_emojis[:24]:
         label = f"{emoji} ({cnt})"
-        row.append(InlineKeyboardButton(label, callback_data=f"mobin_rm_em_{emoji}"))
+        row.append(InlineKeyboardButton(
+            label, callback_data=f"mobin_rm_em_{emoji}"))
         if len(row) == 2:
             kb.append(row)
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton("🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
-    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton(
+        "🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
+    kb.append([InlineKeyboardButton(
+        "❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _mode_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ فوری (همین الان)", callback_data="mobin_mode_instant")],
-        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)", callback_data="mobin_mode_delayed")],
+        [InlineKeyboardButton("⚡ فوری (همین الان)",
+                              callback_data="mobin_mode_instant")],
+        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)",
+                              callback_data="mobin_mode_delayed")],
         [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")],
     ])
 
@@ -1080,9 +1097,11 @@ def _sessions_kb() -> InlineKeyboardMarkup:
     names = list_sessions()
     kb = []
     for name in names[:20]:
-        kb.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
+        kb.append([InlineKeyboardButton(
+            f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
     if names:
-        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها", callback_data="mobin_del_all_sessions")])
+        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها",
+                  callback_data="mobin_del_all_sessions")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")])
     return InlineKeyboardMarkup(kb)
 
@@ -1129,9 +1148,7 @@ async def mobin_cmd(update: Update, context):
     if _is_admin(user_id):
         context.user_data["mobin_authenticated"] = True
         await update.message.reply_text(
-            "🎛 <b>پنل مبین</b>
-
-یکی از گزینه‌ها را انتخاب کنید:",
+            "🎛 <b>پنل مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
@@ -1149,9 +1166,7 @@ async def mobin_password(update: Update, context):
     if _is_password_ok(text):
         context.user_data["mobin_authenticated"] = True
         await update.message.reply_text(
-            "✅ رمز صحیح است.
-
-🎛 <b>پنل مبین</b>",
+            "✅ رمز صحیح است.\n\n🎛 <b>پنل مبین</b>",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
@@ -1167,15 +1182,13 @@ async def mobin_mode_instant(update: Update, context):
     context.user_data.pop("mobin_delay_seconds", None)
     n = len(list_sessions())
     await q.message.edit_text(
-        f"⚡ <b>حالت فوری</b>
-
-"
-        f"🔢 تعداد سشن‌ها (حداکثر {n}):
-"
+        f"⚡ <b>حالت فوری</b>\n\n"
+        f"🔢 تعداد سشن‌ها (حداکثر {n}):\n"
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1186,18 +1199,14 @@ async def mobin_mode_delayed(update: Update, context):
     await q.answer()
     context.user_data["mobin_delay_mode"] = "delayed"
     await q.message.edit_text(
-        "⏱ <b>حالت تاخیری</b>
-
-"
-        "کل زمان پخش را به <b>ثانیه</b> بفرستید (مثلاً <code>60</code>).
-"
-        "ربات این زمان را بین همه سشن‌های انتخاب‌شده به صورت نامساوی تقسیم می‌کند.
-
-"
+        "⏱ <b>حالت تاخیری</b>\n\n"
+        "کل زمان پخش را به <b>ثانیه</b> بفرستید (مثلاً <code>60</code>).\n"
+        "ربات این زمان را بین همه سشن‌های انتخاب‌شده به صورت نامساوی تقسیم می‌کند.\n\n"
         "<i>مثال: ۶۰ ثانیه و ۵ سشن → هر سشن در یک لحظه متفاوت بین ۰ تا ۶۰ ثانیه ری‌اکشن می‌زند.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_DELAY
@@ -1223,15 +1232,13 @@ async def mobin_delay_seconds(update: Update, context):
     context.user_data["mobin_delay_seconds"] = seconds
     n = len(list_sessions())
     await update.message.reply_text(
-        f"✅ زمان کل: <b>{seconds:g}</b> ثانیه
-
-"
-        f"🔢 تعداد سشن‌ها (حداکثر {n}):
-"
+        f"✅ زمان کل: <b>{seconds:g}</b> ثانیه\n\n"
+        f"🔢 تعداد سشن‌ها (حداکثر {n}):\n"
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1298,21 +1305,27 @@ async def mobin_cb(update: Update, context):
             f"✅ سشن‌های سالم و فعال: <b>{res['active']}</b>",
         ]
         if res["revoked"]:
-            report_lines.append(f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
+            report_lines.append(
+                f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
             for name in res["revoked"][:6]:
                 report_lines.append(f"  • <code>{name}</code>")
             if len(res["revoked"]) > 6:
-                report_lines.append(f"  ... و {len(res['revoked']) - 6} مورد دیگر")
+                report_lines.append(
+                    f"  ... و {len(res['revoked']) - 6} مورد دیگر")
 
         if res["duplicates"]:
-            report_lines.append(f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
+            report_lines.append(
+                f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
             for dup_name, orig_name, uid in res["duplicates"][:6]:
-                report_lines.append(f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
+                report_lines.append(
+                    f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
             if len(res["duplicates"]) > 6:
-                report_lines.append(f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
+                report_lines.append(
+                    f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
 
         if not res["revoked"] and not res["duplicates"]:
-            report_lines.append("\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
+            report_lines.append(
+                "\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
 
         try:
             await prog.edit_text("\n".join(report_lines), parse_mode="HTML", reply_markup=_main_kb())
@@ -1411,7 +1424,8 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 هیچ سشنی موجود نیست.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton(
+                        "🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1424,7 +1438,8 @@ async def mobin_cb(update: Update, context):
         for name in names[:30]:
             uid = await _session_user_id(name)
             uid_str = str(uid) if uid else "نامعتبر/غیرمجاز"
-            lines.append(f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
+            lines.append(
+                f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
         if len(names) > 30:
             lines.append(f"\n... و {len(names) - 30} تای دیگر")
 
@@ -1458,7 +1473,8 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 همه سشن‌ها حذف شدند.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton(
+                        "🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1664,7 +1680,8 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
             f"ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد — موردی برای حذف نیست.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+                [InlineKeyboardButton(
+                    "🔙 بازگشت به پنل", callback_data="mobin_back")]
             ]),
         )
         return MOBIN_ROOT
@@ -1827,18 +1844,21 @@ async def mobin_rx_count(update: Update, context):
         elapsed = time.time() - start_time
 
         lines = [f"✅ موفق: {ok_total}/{actual_count}"]
-        lines.append(f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})")
+        lines.append(
+            f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})")
 
         if is_remove:
             lines.append(f"\n🗑 عملیات: {action_label}")
         else:
             lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
             if used_no_reaction:
-                lines.append(f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
+                lines.append(
+                    f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
             if used_unknown:
                 lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
             if used_with_reaction:
-                lines.append(f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
+                lines.append(
+                    f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
 
         if failed:
             lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
@@ -1872,7 +1892,8 @@ async def mobin_rx_count(update: Update, context):
                     keep_emojis=keep_emojis_per_session.get(s, []),
                 ))
             else:
-                coros.append(_react_one_session(s, peer, msg_id, emoji_to_send, fwd_info))
+                coros.append(_react_one_session(
+                    s, peer, msg_id, emoji_to_send, fwd_info))
         results = await asyncio.gather(*coros, return_exceptions=True)
         for s, r in zip(batch, results):
             if isinstance(r, dict) and r.get("ok"):
@@ -1894,13 +1915,8 @@ async def mobin_rx_count(update: Update, context):
         if used_unknown:
             lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
         if used_with_reaction:
-            lines.append(f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
-
-        if used_unknown or used_with_reaction:
             lines.append(
-                "\n<i>⚠️ چون تعداد سشن آزاد کافی نبود، از سشن‌های دیگر هم استفاده شد. "
-                "در این سشن‌ها ایموجی قبلی با ایموجی جدید جایگزین می‌شود و ری‌اکشن تکراری ثبت نمی‌شود.</i>"
-            )
+                f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
 
     if failed:
         lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
@@ -2045,7 +2061,8 @@ def build_mobin_handler():
         entry_points=[CommandHandler("mobin", mobin_cmd)],
         states={
             MOBIN_WAITING_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_password),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_password),
             ],
             MOBIN_ROOT: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
@@ -2054,9 +2071,11 @@ def build_mobin_handler():
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_TARGET: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_target),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_rx_target),
                 MessageHandler(filters.FORWARDED, mobin_rx_target),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
@@ -2065,32 +2084,42 @@ def build_mobin_handler():
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_DELAY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_delay_seconds),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_delay_seconds),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_REMOVE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI_CHOICE: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_rx_count),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_NEW_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_new_password),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_new_password),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_IMPORT_ZIP: [
                 MessageHandler(filters.Document.ALL, mobin_import_zip),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_ADD_SESSION_ZIP: [
                 MessageHandler(filters.Document.ALL, mobin_add_sessions_zip),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", mobin_cancel)],
