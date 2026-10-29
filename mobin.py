@@ -533,30 +533,46 @@ async def _get_global_reactions(client) -> list[str]:
 # TARGET PARSING
 # =========================================================
 def _parse_target_from_text(text: str):
-    t = text.strip()
-    msg_id = 0
-    if "/t.me/" in t or "t.me/" in t:
-        parts = [p for p in t.rstrip("/").split("/") if p]
-        last = parts[-1]
-        if last.isdigit():
-            msg_id = int(last)
-            peer = parts[-2]
-        else:
-            peer = last
-        return peer, msg_id
+    from urllib.parse import urlparse, unquote
+
+    t = (text or "").strip()
+    if not t:
+        return None, None
+
     if t.startswith("@"):
         return t[1:], 0
-    if t.startswith("https://") or t.startswith("http://"):
-        parts = [p for p in t.rstrip("/").split("/") if p]
-        if parts:
-            last = parts[-1]
-            if last.isdigit():
-                msg_id = int(last)
-                peer = parts[-2]
-            else:
-                peer = last
-            return peer, msg_id
-    return None, None
+
+    # لینک کامل یا کوتاه تلگرام
+    candidate = t if "://" in t else ("https://" + t if "t.me/" in t else "")
+    if not candidate:
+        return None, None
+
+    try:
+        parsed = urlparse(candidate)
+        host = (parsed.netloc or "").lower().split(":")[0]
+        if host not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+            return None, None
+
+        parts = [unquote(p) for p in parsed.path.split("/") if p]
+        if not parts:
+            return None, None
+
+        # لینک خصوصی کانال: t.me/c/<channel_id>/<message_id>
+        if parts[0] == "c" and len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+            channel_id = parts[1]
+            message_id = int(parts[2])
+            # قالب marked ID کانال برای Telethon
+            return int(f"-100{channel_id}"), message_id
+
+        # لینک عمومی کانال/پست: t.me/<username>/<message_id>
+        peer = parts[0]
+        if peer in {"s", "share"}:
+            return None, None
+        msg_id = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+        return peer, msg_id
+    except Exception:
+        return None, None
+
 
 
 def _extract_forward_info(message) -> dict | None:
@@ -579,173 +595,201 @@ def _extract_forward_info(message) -> dict | None:
 # REACTION STATUS — 3-state (has / none / unknown)
 # =========================================================
 async def _get_my_reaction_status(session_name, peer_str, msg_id, forward_info=None):
+    """
+    برگرداندن وضعیت سه‌حالته:
+      has     = وجود ری‌اکشن این حساب به‌طور قطعی تأیید شده
+      none    = فهرست کامل قابل مشاهده بوده و نبود ری‌اکشن تأیید شده
+      unknown = اطلاعات کافی برای نتیجه قطعی وجود ندارد
+
+    نکته مهم: نبودن حساب در recent_reactions به‌تنهایی به معنی نداشتن
+    ری‌اکشن نیست؛ این فهرست فقط شامل ری‌اکشن‌های اخیر است.
+    """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
     sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{session_name}.session")
     if not os.path.exists(sess_path):
-        return {"ok": False, "status": "unknown", "emojis": [], "reason": "session file missing"}
+        return {"ok": False, "status": "unknown", "emojis": [],
+                "reason": "فایل سشن وجود ندارد"}
 
     client = TelegramClient(sess_path, api_id, api_hash)
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            return {"ok": False, "status": "unknown", "emojis": [], "reason": "unauthorized"}
+            return {"ok": False, "status": "unknown", "emojis": [],
+                    "reason": "سشن مجاز نیست"}
 
         me = await client.get_me()
         if me is None:
-            return {"ok": False, "status": "unknown", "emojis": [], "reason": "no me"}
+            return {"ok": False, "status": "unknown", "emojis": [],
+                    "reason": "شناسه حساب خوانده نشد"}
         my_uid = int(me.id)
 
-        # ===== parse entity & target_msg_id =====
-        entity = None
-        target_msg_id = 0
-
-        if forward_info:
-            try:
+        # پیدا کردن دقیق پیام هدف
+        try:
+            if forward_info:
                 entity = await client.get_entity(forward_info["chat_id"])
                 target_msg_id = int(forward_info["message_id"])
-            except Exception as e:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"forward entity: {e}"}
-        else:
-            if not peer_str:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": "no target"}
-            try:
-                entity = await client.get_entity(peer_str)
-            except Exception as e:
-                return {"ok": False, "status": "unknown", "emojis": [], "reason": f"entity: {e}"}
-            if msg_id:
-                target_msg_id = int(msg_id)
             else:
-                msgs = await client.get_messages(entity, limit=1)
-                if not msgs:
-                    return {"ok": False, "status": "unknown", "emojis": [], "reason": "no message"}
-                target_msg_id = msgs[0].id
+                if not peer_str:
+                    return {"ok": False, "status": "unknown", "emojis": [],
+                            "reason": "هدف مشخص نشده"}
+                entity = await client.get_entity(peer_str)
+                if msg_id:
+                    target_msg_id = int(msg_id)
+                else:
+                    latest = await client.get_messages(entity, limit=1)
+                    if not latest:
+                        return {"ok": False, "status": "unknown", "emojis": [],
+                                "reason": "پیامی پیدا نشد"}
+                    target_msg_id = int(latest[0].id)
 
-        msgs = await client.get_messages(entity, ids=[target_msg_id])
-        if not msgs or not msgs[0]:
-            return {"ok": False, "status": "unknown", "emojis": [], "reason": "message not found"}
+            fetched = await client.get_messages(entity, ids=target_msg_id)
+            if not fetched:
+                return {"ok": False, "status": "unknown", "emojis": [],
+                        "reason": "پیام پیدا نشد"}
+            msg_obj = fetched[0] if isinstance(fetched, (list, tuple)) else fetched
+            if msg_obj is None:
+                return {"ok": False, "status": "unknown", "emojis": [],
+                        "reason": "پیام پیدا نشد"}
+        except Exception as e:
+            return {"ok": False, "status": "unknown", "emojis": [],
+                    "reason": f"خطا در خواندن پیام: {e}"}
 
-        msg_obj = msgs[0]
         reactions = getattr(msg_obj, "reactions", None)
-
-        # پیام اصلاً ری‌اکشن ندارد → قطعاً none
-        if not reactions:
+        if reactions is None:
+            # پیام به‌طور صریح هیچ مجموعه ری‌اکشنی ندارد.
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        # ===== مرحله ۱: بررسی سریع recent_reactions (فقط برای تشخیص "دارد") =====
+        # مرحله اول: فقط تطبیق قطعی با حساب همین سشن در recent_reactions
         recent = getattr(reactions, "recent_reactions", None) or []
         for item in recent:
             peer_id = getattr(item, "peer_id", None)
-            uid = getattr(peer_id, "user_id", None) if peer_id else None
+            uid = getattr(peer_id, "user_id", None) if peer_id is not None else None
             try:
-                if uid is None or int(uid) != my_uid:
-                    continue
-            except Exception:
+                is_this_account = uid is not None and int(uid) == my_uid
+            except (TypeError, ValueError):
+                is_this_account = False
+            if not is_this_account:
                 continue
+
             reaction = getattr(item, "reaction", None)
             if reaction is None:
-                continue
+                return {"ok": True, "status": "has", "emojis": ["نامشخص"],
+                        "reason": "حساب در recent_reactions پیدا شد"}
             emoticon = getattr(reaction, "emoticon", None)
             if emoticon:
-                return {"ok": True, "status": "has", "emojis": [emoticon], "reason": None}
+                return {"ok": True, "status": "has", "emojis": [emoticon],
+                        "reason": None}
             document_id = getattr(reaction, "document_id", None)
             if document_id:
-                return {"ok": True, "status": "has", "emojis": [f"custom:{document_id}"], "reason": None}
+                return {"ok": True, "status": "has",
+                        "emojis": [f"custom:{document_id}"], "reason": None}
+            # حساب پیدا شده، ولی نوع ری‌اکشن در این نسخه پشتیبانی نمی‌شود.
+            return {"ok": True, "status": "has", "emojis": ["نوع‌ناشناخته"],
+                    "reason": "نوع ری‌اکشن قابل نمایش نیست"}
 
-        # ===== مرحله ۲: لیست کامل — به ازای هر ایموجی جداگانه با فیلتر reaction =====
+        # اگر فهرست کامل کاربران قابل مشاهده نیست، نبودن در recent کافی نیست.
+        can_see_list = bool(getattr(reactions, "can_see_list", False))
         results = getattr(reactions, "results", None) or []
+        if not can_see_list:
+            return {"ok": True, "status": "unknown", "emojis": [],
+                    "reason": "تلگرام فهرست کامل ری‌اکشن‌دهندگان را در دسترس نمی‌گذارد"}
+
         if not results:
+            # فقط چون فهرست کامل قابل مشاهده است، نتیجه none قطعی است.
             return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
-        can_see_list = getattr(reactions, "can_see_list", False)
-
-        my_emojis_found: list[str] = []
-        any_checked = False
+        found_emojis = []
+        incomplete_reasons = []
+        unsupported_reaction = False
 
         for result_item in results:
             reaction_obj = getattr(result_item, "reaction", None)
             if reaction_obj is None:
+                unsupported_reaction = True
                 continue
 
             emoticon = getattr(reaction_obj, "emoticon", None)
             document_id = getattr(reaction_obj, "document_id", None)
-
             if emoticon:
                 filter_reaction = ReactionEmoji(emoticon=emoticon)
+                display_value = emoticon
             elif document_id:
-                filter_reaction = ReactionCustomEmoji(document_id=document_id)
+                filter_reaction = ReactionCustomEmoji(document_id=int(document_id))
+                display_value = f"custom:{document_id}"
             else:
+                # نوع واکنش ناشناخته است؛ نباید به اشتباه none اعلام شود.
+                unsupported_reaction = True
                 continue
 
             offset = ""
-            pages = 0
-            max_pages = 20
             found_this = False
-            check_complete = False
+            completed = False
+            max_pages = 50
 
-            while pages < max_pages:
-                pages += 1
+            for _ in range(max_pages):
                 try:
                     res = await client(GetMessageReactionsListRequest(
                         peer=entity,
                         id=target_msg_id,
-                        reaction=filter_reaction,  # ← فیلتر بر اساس ایموجی
+                        reaction=filter_reaction,
                         limit=100,
                         offset=offset,
                     ))
                 except Exception as e:
-                    mobin_logger.debug(
-                        f"GetMessageReactionsList failed for {session_name} "
-                        f"emoji {emoticon or document_id}: {e}"
+                    incomplete_reasons.append(
+                        f"خواندن فهرست {display_value} ناموفق بود: {e}"
                     )
                     break
 
-                reactions_list = getattr(res, "reactions", None) or []
-                for item in reactions_list:
-                    peer_id = getattr(item, "peer_id", None)
-                    uid = getattr(peer_id, "user_id", None) if peer_id else None
+                page_reactions = getattr(res, "reactions", None) or []
+                for entry in page_reactions:
+                    peer_id = getattr(entry, "peer_id", None)
+                    uid = getattr(peer_id, "user_id", None) if peer_id is not None else None
                     try:
-                        if uid is None or int(uid) != my_uid:
-                            continue
-                    except Exception:
+                        if uid is not None and int(uid) == my_uid:
+                            found_this = True
+                            break
+                    except (TypeError, ValueError):
                         continue
-                    found_this = True
-                    break
 
                 if found_this:
-                    check_complete = True
+                    completed = True
                     break
 
                 next_offset = getattr(res, "next_offset", None)
                 if not next_offset:
-                    check_complete = True
+                    completed = True
                     break
                 offset = next_offset
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
 
             if found_this:
-                any_checked = True
-                if emoticon:
-                    my_emojis_found.append(emoticon)
-                elif document_id:
-                    my_emojis_found.append(f"custom:{document_id}")
-            elif check_complete:
-                any_checked = True
+                found_emojis.append(display_value)
+            elif not completed:
+                incomplete_reasons.append(
+                    f"بررسی کامل ری‌اکشن {display_value} انجام نشد"
+                )
 
-        if my_emojis_found:
-            return {"ok": True, "status": "has", "emojis": my_emojis_found, "reason": None}
-        if any_checked:
-            return {"ok": True, "status": "none", "emojis": [], "reason": None}
+        # وجود حتی یک مورد، نتیجه مثبت قطعی می‌دهد.
+        if found_emojis:
+            return {"ok": True, "status": "has",
+                    "emojis": list(dict.fromkeys(found_emojis)), "reason": None}
 
-        if not can_see_list:
+        # فقط وقتی تمام انواع ری‌اکشن با موفقیت بررسی شده‌اند می‌توان none گفت.
+        if incomplete_reasons or unsupported_reaction:
+            reason_parts = incomplete_reasons[:3]
+            if unsupported_reaction:
+                reason_parts.append("یک نوع ری‌اکشن پشتیبانی‌نشده وجود دارد")
             return {"ok": True, "status": "unknown", "emojis": [],
-                    "reason": "cannot see full list"}
-        return {"ok": True, "status": "unknown", "emojis": [],
-                "reason": "no emoji list could be fetched"}
+                    "reason": "؛ ".join(reason_parts) or "بررسی کامل نشد"}
+
+        return {"ok": True, "status": "none", "emojis": [], "reason": None}
 
     except Exception as e:
-        return {"ok": False, "status": "unknown", "emojis": [], "reason": str(e)}
+        return {"ok": False, "status": "unknown", "emojis": [],
+                "reason": str(e)}
     finally:
         try:
             await client.disconnect()
@@ -1119,27 +1163,12 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     if data == "mobin_reaction":
-        sessions = list_sessions()
-        if not sessions:
-            await q.message.reply_text(
-                "⚠️ هیچ سشن فعالی موجود نیست.\n"
-                "ابتدا از طریق «📥 اضافه کردن سشن» یک ZIP آپلود کنید."
-            )
-            return MOBIN_ROOT
         await q.message.reply_text(
-            f"⚡ <b>ری‌اکشن فیک</b>\n\n"
-            f"🔋 {len(sessions)} سشن موجود\n\n"
-            "روش ارسال هدف:\n"
-            "• <b>لینک پست</b> (مثل <code>https://t.me/chan/123</code>)\n"
-            "• <b>@username</b> کانال (آخرین پست)\n"
-            "• <b>فوروارد/کپی</b> کردن پست از کانال به اینجا\n\n"
-            "بعد از ارسال هدف، ربات همه سشن‌ها را چک می‌کند و گزارش می‌دهد.\n"
-            "سپس فقط از سشن‌های آزاد تأییدشده استفاده می‌شود.\n\n"
-            "برای انصراف دکمه «❌ لغو» را بزنید.",
-            parse_mode="HTML",
-            reply_markup=_cancel_inline_kb(),
+            "ℹ️ ارسال خودکار ری‌اکشن با چندین سشن در این نسخه غیرفعال است.\n"
+            "برای بررسی دقیق وضعیت ری‌اکشن‌های موجود، از «🚫 برداشتن ری‌اکشن» استفاده کنید.",
+            reply_markup=_main_kb(),
         )
-        return MOBIN_REACTION_WAITING_TARGET
+        return MOBIN_ROOT
 
     if data == "mobin_remove_reaction":
         sessions = list_sessions()
@@ -1485,6 +1514,14 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
 
 # ---------- اجرا ----------
 async def mobin_rx_count(update: Update, context):
+    await update.message.reply_text(
+        "⛔️ ارسال گروهی ری‌اکشن در این نسخه غیرفعال است؛ "
+        "اسکن فقط وضعیت تأییدشده/نامشخص را گزارش می‌کند.",
+        reply_markup=_main_kb(),
+    )
+    _clear_mobin_user_data(context, keep_auth=True)
+    return MOBIN_ROOT
+
     text = (update.message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
         await update.message.reply_text(
