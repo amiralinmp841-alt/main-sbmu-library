@@ -15,7 +15,6 @@ from pathlib import Path
 
 from telegram import (
     Update,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -163,10 +162,6 @@ def delete_all_sessions() -> int:
 # SESSION user_id EXTRACTION
 # =========================================================
 async def _session_user_id(session_name: str) -> int | None:
-    """
-    user_id عددی داخل فایل .session را برمی‌گرداند.
-    اگه نامعتبر/غیرمجاز/آسیب‌دیده باشه None برمی‌گردونه.
-    """
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
     api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
@@ -194,7 +189,6 @@ async def _session_user_id(session_name: str) -> int | None:
 
 
 async def _existing_session_user_ids() -> dict[int, str]:
-    """mapping: user_id → session_name برای همه سشن‌های محلی."""
     mapping: dict[int, str] = {}
     for name in list_sessions():
         uid = await _session_user_id(name)
@@ -232,11 +226,6 @@ def _next_session_name() -> str:
         i += 1
 
 async def import_sessions_zip(raw_bytes: bytes) -> dict:
-    """
-    ZIP را پردازش می‌کنه با دو لایه چک تکراری:
-      1) hash محتوای فایل (سریع)
-      2) user_id عددی داخل session (دقیق — برای session‌هایی که با reconnect hash‌شون عوض شده)
-    """
     imported: list[tuple[str, str]] = []
     skipped_existing: list[tuple[str, str]] = []
     skipped_duplicate_in_zip: list[tuple[str, str]] = []
@@ -247,7 +236,6 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
 
     existing_hashes = _existing_session_hashes()
 
-    # مرحله ۱: استخراج محتوا و hash از ZIP
     entries: list[tuple[str, bytes, str]] = []
     try:
         with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
@@ -268,15 +256,12 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
         return {"imported": [], "skipped_existing": [],
                 "skipped_duplicate_in_zip": [], "errors": [f"خطای کلی: {e}"]}
 
-    # مرحله ۲: user_id سشن‌های موجود
     existing_user_ids = await _existing_session_user_ids()
 
-    # مرحله ۳: پردازش هر ورودی
     seen_in_zip_hash: dict[str, str] = {}
     seen_in_zip_uid: dict[int, str] = {}
 
     for base, data, content_hash in entries:
-        # چک hash
         if content_hash in existing_hashes:
             skipped_existing.append((base, "session از قبل موجود است (hash یکسان)"))
             continue
@@ -284,7 +269,6 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
             skipped_duplicate_in_zip.append((base, seen_in_zip_hash[content_hash]))
             continue
 
-        # موقت بنویس تا user_id استخراج بشه
         new_name = _next_session_name()
         final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{new_name}.session")
         try:
@@ -294,7 +278,6 @@ async def import_sessions_zip(raw_bytes: bytes) -> dict:
             errors.append(f"{base}: نوشتن خطا ({e})")
             continue
 
-        # چک user_id عددی
         uid = await _session_user_id(new_name)
 
         if uid is not None:
@@ -406,7 +389,6 @@ def restore_mobin_from_telegram() -> bool:
             return False
         with open(MOBIN_RESTORE_ZIP, "rb") as f:
             raw = f.read()
-        # اجرای import در event loop جدید (restore از startup همگام صدا زده می‌شه)
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -433,13 +415,6 @@ async def _get_channel_reactions(
     peer_str: str | None = None,
     forward_info: dict | None = None,
 ) -> list[str]:
-    """
-    فقط ری‌اکشن‌های مجازِ همان کانال/گروه را برمی‌گرداند.
-    - chatReactionsNone → []
-    - chatReactionsAll → لیست سراسری
-    - chatReactionsSome → فقط همون‌ها
-    - خطا / نامشخص → [] (هیچ fallback به ایموجی‌های پیش‌فرض)
-    """
     sessions = list_sessions()
     if not sessions:
         return []
@@ -481,7 +456,6 @@ async def _get_channel_reactions(
             except Exception:
                 chat_reactions = None
 
-        # هیچ تنظیمی نداره → یعنی همه ری‌اکشن‌های سراسری مجازن
         if chat_reactions is None:
             return await _get_global_reactions(client)
 
@@ -500,7 +474,7 @@ async def _get_channel_reactions(
                 emoticon = getattr(r, "emoticon", None)
                 if emoticon:
                     emojis.append(emoticon)
-            return emojis  # ← حتی اگه خالی باشه، fallback نمی‌کنیم
+            return emojis
 
         return []
 
@@ -515,7 +489,6 @@ async def _get_channel_reactions(
 
 
 async def _get_global_reactions(client) -> list[str]:
-    """لیست سراسری ری‌اکشن‌های مجاز تلگرام (فقط برای chatReactionsAll)."""
     now = time.time()
     if (_reactions_cache["list"] is not None
             and now - _reactions_cache["fetched_at"] < _reactions_cache["ttl"]):
@@ -584,6 +557,95 @@ def _extract_forward_info(message) -> dict | None:
         if origin_chat is not None and origin_msg_id:
             return {"chat_id": origin_chat.id, "message_id": int(origin_msg_id)}
     return None
+
+# =========================================================
+# REACTION CHECK (does this session already have a reaction?)
+# =========================================================
+async def _get_my_reaction_status(
+    session_name: str,
+    peer_str: str | None,
+    msg_id: int,
+    forward_info: dict | None = None,
+) -> dict:
+    """
+    بررسی می‌کند که آیا این سشن روی پیام هدف ری‌اکشن دارد یا نه.
+    خروجی: {"ok": bool, "has_reaction": bool, "emojis": list[str], "reason": str|None}
+    - ok=False یعنی خطا در دریافت اطلاعات (مثلاً unauthorized)
+    - ok=True, has_reaction=False یعنی هیچ ری‌اکشنی روی پست ندارد
+    - ok=True, has_reaction=True یعنی حداقل یک ری‌اکشن دارد
+    """
+    data = load_mobin_data()
+    api_id = data.get("api_id", 2040)
+    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+    sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{session_name}.session")
+    if not os.path.exists(sess_path):
+        return {"ok": False, "has_reaction": False, "emojis": [], "reason": "session file missing"}
+
+    client = TelegramClient(sess_path, api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return {"ok": False, "has_reaction": False, "emojis": [], "reason": "unauthorized"}
+
+        if forward_info:
+            try:
+                entity = await client.get_entity(forward_info["chat_id"])
+            except Exception as e:
+                return {"ok": False, "has_reaction": False, "emojis": [], "reason": f"forward entity: {e}"}
+            target_msg_id = forward_info["message_id"]
+        else:
+            if not peer_str:
+                return {"ok": False, "has_reaction": False, "emojis": [], "reason": "no target"}
+            try:
+                entity = await client.get_entity(peer_str)
+            except Exception as e:
+                return {"ok": False, "has_reaction": False, "emojis": [], "reason": f"entity: {e}"}
+            if msg_id:
+                target_msg_id = msg_id
+            else:
+                msgs = await client.get_messages(entity, limit=1)
+                if not msgs:
+                    return {"ok": False, "has_reaction": False, "emojis": [], "reason": "no message"}
+                target_msg_id = msgs[0].id
+
+        # دریافت پیام‌ها با reactions
+        try:
+            msgs = await client.get_messages(entity, ids=[target_msg_id])
+        except Exception as e:
+            return {"ok": False, "has_reaction": False, "emojis": [], "reason": f"get_messages: {e}"}
+
+        if not msgs or not msgs[0]:
+            return {"ok": False, "has_reaction": False, "emojis": [], "reason": "message not found"}
+
+        msg_obj = msgs[0]
+        reactions = getattr(msg_obj, "reactions", None)
+        if not reactions:
+            return {"ok": True, "has_reaction": False, "emojis": [], "reason": None}
+
+        results = getattr(reactions, "results", None) or []
+        emojis: list[str] = []
+        for r in results:
+            reaction = getattr(r, "reaction", None)
+            if reaction is None:
+                continue
+            emoticon = getattr(reaction, "emoticon", None)
+            if emoticon:
+                emojis.append(emoticon)
+            else:
+                # custom emoji / document
+                document_id = getattr(reaction, "document_id", None)
+                if document_id:
+                    emojis.append(f"custom:{document_id}")
+
+        return {"ok": True, "has_reaction": bool(emojis), "emojis": emojis, "reason": None}
+
+    except Exception as e:
+        return {"ok": False, "has_reaction": False, "emojis": [], "reason": str(e)}
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 # =========================================================
 # REACTION (single session)
@@ -660,11 +722,12 @@ def _main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❌ بستن پنل", callback_data="mobin_close")],
     ])
 
-def _cancel_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
+def _cancel_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")],
+    ])
 
 def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
-    """کیبورد اینلاین با ایموجی‌های مجاز (پویا)."""
     if not emojis:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
@@ -677,7 +740,7 @@ def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")])
+    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 def _sessions_kb() -> InlineKeyboardMarkup:
@@ -718,6 +781,11 @@ async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین
             text, parse_mode="HTML", reply_markup=_main_kb(),
         )
 
+def _clear_mobin_user_data(context):
+    for k in list(context.user_data.keys()):
+        if k.startswith("mobin_"):
+            context.user_data.pop(k, None)
+
 # =========================================================
 # HANDLERS
 # =========================================================
@@ -740,9 +808,6 @@ async def mobin_cmd(update: Update, context):
 
 async def mobin_password(update: Update, context):
     text = (update.message.text or "").strip()
-    if text == "❌ لغو":
-        await update.message.reply_text("لغو شد.")
-        return ConversationHandler.END
     if _is_password_ok(text):
         context.user_data["mobin_authenticated"] = True
         await update.message.reply_text(
@@ -764,8 +829,22 @@ async def mobin_cb(update: Update, context):
         await q.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return MOBIN_ROOT
 
+    # لغو سراسری (اینلاین)
+    if data == "mobin_cancel_action":
+        _clear_mobin_user_data(context)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        await q.message.reply_text(
+            "لغو شد. به پنل برگشتید.",
+            reply_markup=_main_kb(),
+        )
+        return MOBIN_ROOT
+
     if data == "mobin_close":
         context.user_data.pop("mobin_authenticated", None)
+        _clear_mobin_user_data(context)
         try:
             await q.message.delete()
         except Exception:
@@ -792,10 +871,11 @@ async def mobin_cb(update: Update, context):
             "• <b>لینک پست</b> (مثل <code>https://t.me/chan/123</code>)\n"
             "• <b>@username</b> کانال (آخرین پست)\n"
             "• <b>فوروارد/کپی</b> کردن پست از کانال به اینجا\n\n"
-            "فقط ری‌اکشن‌هایی که خود کانال مجاز کرده نمایش داده می‌شود.\n\n"
-            "برای انصراف «❌ لغو» را بفرستید.",
+            "فقط ری‌اکشن‌هایی که خود کانال مجاز کرده نمایش داده می‌شود.\n"
+            "قبل از زدن، چک می‌شود کدام اکانت‌ها از قبل ری‌اکشن دارند.\n\n"
+            "برای انصراف دکمه «❌ لغو» را بزنید.",
             parse_mode="HTML",
-            reply_markup=_cancel_kb(),
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_TARGET
 
@@ -807,9 +887,11 @@ async def mobin_cb(update: Update, context):
         await q.message.reply_text(
             f"🚫 <b>برداشتن ری‌اکشن</b>\n\n"
             f"🔋 {len(sessions)} سشن موجود\n\n"
-            "لینک پست را بفرستید یا پست را فوروارد/کپی کنید.",
+            "لینک پست را بفرستید یا پست را فوروارد/کپی کنید.\n"
+            "قبل از حذف، چک می‌شود کدام اکانت‌ها اصلاً ری‌اکشن ندارند.\n\n"
+            "برای انصراف دکمه «❌ لغو» را بزنید.",
             parse_mode="HTML",
-            reply_markup=_cancel_kb(),
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_REMOVE
 
@@ -819,9 +901,11 @@ async def mobin_cb(update: Update, context):
         n = len(list_sessions())
         await q.message.edit_text(
             f"🎭 ایموجی انتخابی: {emoji}\n\n"
-            f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):",
+            f"🔢 تعداد سشن‌ها (حداکثر {min(n, 10)}):\n"
+            f"<i>اعداد را همینجا تایپ کنید.</i>",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+                [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
             ]),
         )
         return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -838,7 +922,7 @@ async def mobin_cb(update: Update, context):
             "• هم با سشن‌های موجود چک می‌شه، هم داخل خود ZIP\n\n"
             f"مقدار فعلی: <code>API_ID={load_mobin_data().get('api_id')}</code>",
             parse_mode="HTML",
-            reply_markup=_cancel_kb(),
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_WAITING_ADD_SESSION_ZIP
 
@@ -853,7 +937,6 @@ async def mobin_cb(update: Update, context):
             )
             return MOBIN_ROOT
 
-        # ساخت لیست با user_id عددی
         await q.message.edit_text(
             f"⏳ در حال خواندن user_id سشن‌ها ({len(names)})...",
             parse_mode="HTML",
@@ -921,14 +1004,14 @@ async def mobin_cb(update: Update, context):
     if data == "mobin_backup_import":
         await q.message.reply_text(
             "📥 فایل ZIP بکاپ را ارسال کنید:",
-            reply_markup=_cancel_kb(),
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_WAITING_IMPORT_ZIP
 
     if data == "mobin_change_password":
         await q.message.reply_text(
             "🔑 رمز جدید (حداقل ۳ کاراکتر):",
-            reply_markup=_cancel_kb(),
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_WAITING_NEW_PASSWORD
 
@@ -938,10 +1021,6 @@ async def mobin_cb(update: Update, context):
 async def mobin_rx_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
-
-    if text == "❌ لغو":
-        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
-        return MOBIN_ROOT
 
     fwd = _extract_forward_info(msg)
     if fwd:
@@ -953,8 +1032,8 @@ async def mobin_rx_target(update: Update, context):
             await msg.reply_text(
                 "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
                 "یا نتونستم به تنظیمات ری‌اکشن کانال دسترسی پیدا کنم.\n"
-                "برای انصراف «❌ لغو» را بفرستید.",
-                reply_markup=_cancel_kb(),
+                "برای انصراف دکمه «❌ لغو» را بزنید.",
+                reply_markup=_cancel_inline_kb(),
             )
             return MOBIN_REACTION_WAITING_TARGET
         await msg.reply_text(
@@ -970,6 +1049,7 @@ async def mobin_rx_target(update: Update, context):
             "لینک بفرست (مثل <code>https://t.me/chan/123</code>)، "
             "یا @username، یا پست را فوروارد کن.",
             parse_mode="HTML",
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_TARGET
 
@@ -982,8 +1062,8 @@ async def mobin_rx_target(update: Update, context):
         await msg.reply_text(
             "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
             "یا نتونستم به تنظیمات ری‌اکشن کانال دسترسی پیدا کنم.\n"
-            "برای انصراف «❌ لغو» را بفرستید.",
-            reply_markup=_cancel_kb(),
+            "برای انصراف دکمه «❌ لغو» را بزنید.",
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_TARGET
 
@@ -998,17 +1078,16 @@ async def mobin_remove_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
 
-    if text == "❌ لغو":
-        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
-        return MOBIN_ROOT
-
     fwd = _extract_forward_info(msg)
     if fwd:
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
         await msg.reply_text(
-            f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):",
+            f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):\n"
+            f"<i>عدد را تایپ کنید.</i>",
+            parse_mode="HTML",
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_ACCOUNTS
 
@@ -1017,6 +1096,7 @@ async def mobin_remove_target(update: Update, context):
         await msg.reply_text(
             "❌ نتوانستم هدف را تشخیص بدم.\n"
             "لینک بفرست یا پست را فوروارد کن.",
+            reply_markup=_cancel_inline_kb(),
         )
         return MOBIN_REACTION_WAITING_REMOVE
 
@@ -1025,18 +1105,21 @@ async def mobin_remove_target(update: Update, context):
     context.user_data["mobin_forward_info"] = None
 
     await msg.reply_text(
-        f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):",
+        f"🔢 تعداد سشن‌ها (حداکثر {min(len(list_sessions()), 10)}):\n"
+        f"<i>عدد را تایپ کنید.</i>",
+        parse_mode="HTML",
+        reply_markup=_cancel_inline_kb(),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
 
 # ---------- تعداد سشن‌ها -> اجرا ----------
 async def mobin_rx_count(update: Update, context):
     text = (update.message.text or "").strip()
-    if text == "❌ لغو":
-        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
-        return MOBIN_ROOT
     if not text.isdigit() or int(text) <= 0:
-        await update.message.reply_text("❌ عدد معتبر وارد کنید.")
+        await update.message.reply_text(
+            "❌ عدد معتبر وارد کنید.",
+            reply_markup=_cancel_inline_kb(),
+        )
         return MOBIN_REACTION_WAITING_ACCOUNTS
 
     count = int(text)
@@ -1047,15 +1130,41 @@ async def mobin_rx_count(update: Update, context):
     msg_id = context.user_data.get("mobin_rx_msg_id", 0)
     emoji = context.user_data.get("mobin_rx_emoji")
     fwd_info = context.user_data.get("mobin_forward_info")
+    is_remove = emoji is None
 
-    action_label = "برداشتن ری‌اکشن" if not emoji else f"ری‌اکشن {emoji}"
+    action_label = "برداشتن ری‌اکشن" if is_remove else f"ری‌اکشن {emoji}"
     status_msg = await update.message.reply_text(
         f"🚀 در حال اجرا ({action_label}) روی {count} سشن...\n"
+        f"🔍 اول چک می‌کنم وضعیت ری‌اکشن فعلی هر سشن..."
     )
 
+    selected = sessions[:count]
     ok_total = 0
     failed = []
-    selected = sessions[:count]
+    already_had = []        # ری‌اکشن‌دار قبل از عملیات
+    had_no_reaction = []    # بدون ری‌اکشن قبل از عملیات (برای حالت حذف)
+    check_failed = []       # خطا در چک اولیه
+
+    # ===== مرحله ۱: چک وضعیت فعلی هر سشن =====
+    for i in range(0, len(selected), 3):
+        batch = selected[i:i+3]
+        checks = await asyncio.gather(
+            *[_get_my_reaction_status(s, peer, msg_id, fwd_info) for s in batch],
+            return_exceptions=True,
+        )
+        for s, r in zip(batch, checks):
+            if not isinstance(r, dict) or not r.get("ok"):
+                reason = r.get("reason") if isinstance(r, dict) else str(r)
+                check_failed.append(f"• <code>{s}</code>: {reason}")
+                continue
+            if r["has_reaction"]:
+                already_had.append((s, r["emojis"]))
+            else:
+                had_no_reaction.append(s)
+        if i + 3 < len(selected):
+            await asyncio.sleep(random.uniform(1.5, 3))
+
+    # ===== مرحله ۲: اجرای عملیات =====
     for i in range(0, len(selected), 3):
         batch = selected[i:i+3]
         results = await asyncio.gather(
@@ -1071,9 +1180,36 @@ async def mobin_rx_count(update: Update, context):
         if i + 3 < len(selected):
             await asyncio.sleep(random.uniform(3, 7))
 
-    summary = f"✅ موفق: {ok_total}/{count}"
+    # ===== ساخت گزارش =====
+    lines = [f"✅ موفق: {ok_total}/{count}"]
+
+    if not is_remove:
+        # حالت ری‌اکشن زدن
+        if already_had:
+            lines.append(f"\n⚠️ {len(already_had)} اکانت از قبل ری‌اکشن داشتند:")
+            for name, emojis in already_had[:8]:
+                emoji_str = "، ".join(emojis[:3]) if emojis else "نامشخص"
+                lines.append(f"  • <code>{name}</code> — {emoji_str}")
+            if len(already_had) > 8:
+                lines.append(f"  ... و {len(already_had) - 8} تای دیگر")
+    else:
+        # حالت حذف ری‌اکشن
+        if had_no_reaction:
+            lines.append(f"\n🟡 {len(had_no_reaction)} اکانت هیچ ری‌اکشنی نداشتند (کاری لازم نبود):")
+            for name in had_no_reaction[:8]:
+                lines.append(f"  • <code>{name}</code>")
+            if len(had_no_reaction) > 8:
+                lines.append(f"  ... و {len(had_no_reaction) - 8} تای دیگر")
+
+    if check_failed:
+        lines.append(f"\n🔎 خطا در چک اولیه ({len(check_failed)}):")
+        lines.extend(check_failed[:5])
+
     if failed:
-        summary += "\n\n❌ ناموفق‌ها:\n" + "\n".join(failed[:10])
+        lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
+        lines.extend(failed[:10])
+
+    summary = "\n".join(lines)
     try:
         await status_msg.edit_text(summary, parse_mode="HTML")
     except Exception:
@@ -1088,11 +1224,11 @@ async def mobin_rx_count(update: Update, context):
 # ---------- تغییر رمز ----------
 async def mobin_new_password(update: Update, context):
     text = (update.message.text or "").strip()
-    if text == "❌ لغو":
-        await _send_main_menu(update, context, "لغو شد. به پنل برگشتید.")
-        return MOBIN_ROOT
     if len(text) < 3:
-        await update.message.reply_text("❌ خیلی کوتاه است.")
+        await update.message.reply_text(
+            "❌ خیلی کوتاه است. حداقل ۳ کاراکتر:",
+            reply_markup=_cancel_inline_kb(),
+        )
         return MOBIN_WAITING_NEW_PASSWORD
     data = load_mobin_data()
     data["password"] = text
@@ -1107,7 +1243,10 @@ async def mobin_new_password(update: Update, context):
 async def mobin_import_zip(update: Update, context):
     doc = update.message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
-        await update.message.reply_text("❌ فقط ZIP بفرستید یا /cancel.")
+        await update.message.reply_text(
+            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
+            reply_markup=_cancel_inline_kb(),
+        )
         return MOBIN_WAITING_IMPORT_ZIP
 
     file = await doc.get_file()
@@ -1130,7 +1269,10 @@ async def mobin_import_zip(update: Update, context):
             reply_markup=_main_kb(),
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا: {e}")
+        await update.message.reply_text(
+            f"❌ خطا: {e}",
+            reply_markup=_cancel_inline_kb(),
+        )
         return MOBIN_WAITING_IMPORT_ZIP
     return MOBIN_ROOT
 
@@ -1138,7 +1280,10 @@ async def mobin_import_zip(update: Update, context):
 async def mobin_add_sessions_zip(update: Update, context):
     doc = update.message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
-        await update.message.reply_text("❌ فقط ZIP بفرستید یا /cancel.")
+        await update.message.reply_text(
+            "❌ فقط ZIP بفرستید یا از دکمه «❌ لغو» استفاده کنید.",
+            reply_markup=_cancel_inline_kb(),
+        )
         return MOBIN_WAITING_ADD_SESSION_ZIP
 
     file = await doc.get_file()
@@ -1185,9 +1330,7 @@ async def mobin_add_sessions_zip(update: Update, context):
     return MOBIN_ROOT
 
 async def mobin_cancel(update: Update, context):
-    for k in list(context.user_data.keys()):
-        if k.startswith("mobin_"):
-            context.user_data.pop(k, None)
+    _clear_mobin_user_data(context)
     await update.message.reply_text("لغو شد.")
     return ConversationHandler.END
 
@@ -1210,6 +1353,7 @@ def build_mobin_handler():
             MOBIN_REACTION_WAITING_TARGET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_target),
                 MessageHandler(filters.FORWARDED, mobin_rx_target),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
                 CallbackQueryHandler(mobin_cb, pattern=r"^mobin_"),
@@ -1217,18 +1361,23 @@ def build_mobin_handler():
             MOBIN_REACTION_WAITING_REMOVE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_NEW_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_new_password),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_IMPORT_ZIP: [
                 MessageHandler(filters.Document.ALL, mobin_import_zip),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_ADD_SESSION_ZIP: [
                 MessageHandler(filters.Document.ALL, mobin_add_sessions_zip),
+                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", mobin_cancel)],
