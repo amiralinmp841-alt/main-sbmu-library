@@ -55,7 +55,6 @@ _FALLBACK_EMOJIS = [
     "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳",
 ]
 
-# Background tasks tracking: task_id -> {"cancel_event": Event, "task": asyncio.Task, "status_msg": msg, "info": dict}
 _bg_tasks = {}
 
 # ---------- STATES ----------
@@ -99,6 +98,16 @@ def configure_mobin(
     _mobin_ctx["backup_download"] = backup_download
     _mobin_ctx["loop_getter"] = loop_getter
     os.makedirs(MOBIN_SESSIONS_DIR, exist_ok=True)
+
+
+# =========================================================
+# ADMIN CHECK
+# =========================================================
+def _is_admin(user_id) -> bool:
+    try:
+        return int(user_id) in [int(x) for x in _mobin_ctx.get("admin_ids", [])]
+    except Exception:
+        return False
 
 
 # =========================================================
@@ -546,11 +555,13 @@ async def _get_channel_reactions(
         chat_reactions = None
         try:
             full = await client(functions.channels.GetFullChannelRequest(entity))
-            chat_reactions = getattr(full.full_chat, "available_reactions", None)
+            chat_reactions = getattr(
+                full.full_chat, "available_reactions", None)
         except Exception:
             try:
                 full = await client(functions.messages.GetFullChatRequest(entity.id))
-                chat_reactions = getattr(full.full_chat, "available_reactions", None)
+                chat_reactions = getattr(
+                    full.full_chat, "available_reactions", None)
             except Exception:
                 chat_reactions = None
 
@@ -571,8 +582,8 @@ async def _get_channel_reactions(
                         emojis.append(emoticon)
                 allowed_emojis = emojis
 
-        # دریافت ایموجی‌های موجود روی خود پیام (حتی اگر الان بسته شده باشد)
-        target_mid = int(forward_info["message_id"]) if forward_info else int(msg_id or 0)
+        target_mid = int(forward_info["message_id"]
+                         ) if forward_info else int(msg_id or 0)
         post_emojis = []
         if target_mid > 0:
             try:
@@ -1116,14 +1127,22 @@ def _main_kb() -> InlineKeyboardMarkup:
     active_bg = len(_bg_tasks)
     bg_btn_text = f"⏳ عملیات‌های در حال اجرا ({active_bg})" if active_bg else "⏳ عملیات‌های فعال (۰)"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
-        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن", callback_data="mobin_remove_reaction")],
-        [InlineKeyboardButton(bg_btn_text, callback_data="mobin_list_bg_tasks")],
-        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها", callback_data="mobin_clean_sessions")],
-        [InlineKeyboardButton(f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
-        [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
-        [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
-        [InlineKeyboardButton("📥 وارد کردن بکاپ", callback_data="mobin_backup_import")],
+        [InlineKeyboardButton(
+            "⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
+        [InlineKeyboardButton("🚫 برداشتن ری‌اکشن",
+                              callback_data="mobin_remove_reaction")],
+        [InlineKeyboardButton(
+            bg_btn_text, callback_data="mobin_list_bg_tasks")],
+        [InlineKeyboardButton("🧹 پاکسازی و تست سشن‌ها",
+                              callback_data="mobin_clean_sessions")],
+        [InlineKeyboardButton(
+            f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
+        [InlineKeyboardButton(
+            f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
+        [InlineKeyboardButton(
+            "📤 دریافت بکاپ", callback_data="mobin_backup_get")],
+        [InlineKeyboardButton("📥 وارد کردن بکاپ",
+                              callback_data="mobin_backup_import")],
         [InlineKeyboardButton("❌ بستن پنل", callback_data="mobin_close")],
     ])
 
@@ -1137,7 +1156,8 @@ def _cancel_inline_kb() -> InlineKeyboardMarkup:
 def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
     if not emojis:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton(
+                "🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     for e in emojis[:24]:
@@ -1147,34 +1167,41 @@ def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton(
+        "❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _remove_emoji_kb(emoji_counts: dict[str, int]) -> InlineKeyboardMarkup:
     if not emoji_counts:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+            [InlineKeyboardButton(
+                "🔙 بازگشت به پنل", callback_data="mobin_back")]
         ])
     kb, row = [], []
     sorted_emojis = sorted(emoji_counts.items(), key=lambda x: -x[1])
     for emoji, cnt in sorted_emojis[:24]:
         label = f"{emoji} ({cnt})"
-        row.append(InlineKeyboardButton(label, callback_data=f"mobin_rm_em_{emoji}"))
+        row.append(InlineKeyboardButton(
+            label, callback_data=f"mobin_rm_em_{emoji}"))
         if len(row) == 2:
             kb.append(row)
             row = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton("🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
-    kb.append([InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")])
+    kb.append([InlineKeyboardButton(
+        "🗑 حذف همه (همه ایموجی‌ها)", callback_data="mobin_rm_em_ALL")])
+    kb.append([InlineKeyboardButton(
+        "❌ لغو", callback_data="mobin_cancel_action")])
     return InlineKeyboardMarkup(kb)
 
 
 def _mode_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ فوری (همین الان)", callback_data="mobin_mode_instant")],
-        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)", callback_data="mobin_mode_delayed")],
+        [InlineKeyboardButton("⚡ فوری (همین الان)",
+                              callback_data="mobin_mode_instant")],
+        [InlineKeyboardButton("⏱ تاخیری (پخش در زمان)",
+                              callback_data="mobin_mode_delayed")],
         [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")],
     ])
 
@@ -1183,9 +1210,11 @@ def _sessions_kb() -> InlineKeyboardMarkup:
     names = list_sessions()
     kb = []
     for name in names[:20]:
-        kb.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
+        kb.append([InlineKeyboardButton(
+            f"🗑 {name}", callback_data=f"mobin_del_session_{name}")])
     if names:
-        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها", callback_data="mobin_del_all_sessions")])
+        kb.append([InlineKeyboardButton("🗑 حذف همه سشن‌ها",
+                  callback_data="mobin_del_all_sessions")])
     kb.append([InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")])
     return InlineKeyboardMarkup(kb)
 
@@ -1219,8 +1248,16 @@ def _clear_mobin_user_data(context):
 # =========================================================
 async def mobin_cmd(update: Update, context):
     """
-    باز شدن مستقیم پنل برای تمامی کاربران بدون نیاز به پسورد
+    فقط ادمین‌ها اجازه باز کردن پنل را دارند.
     """
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        await update.message.reply_text(
+            "⛔️ این پنل خصوصی است و فقط برای ادمین قابل دسترسی است.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "🎛 <b>پنل مدیریت ری‌اکشن مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
         parse_mode="HTML",
@@ -1231,17 +1268,23 @@ async def mobin_cmd(update: Update, context):
 
 async def mobin_start_reset(update: Update, context):
     """
-    ریست کردن کامل وضعیت پنل و گفتگو با زدن /start و بازگرداندن ربات به حالت عادی
+    ریست پنل. برای غیرادمین بی‌صدا رد می‌شود.
     """
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        _clear_mobin_user_data(context)
+        return ConversationHandler.END
+
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
         ev.set()
 
-    # پاک کردن پیام پنل قبلی در صورت وجود برای تمیز ماندن چت
     last_menu_msg_id = context.user_data.get("mobin_last_panel_msg_id")
     if last_menu_msg_id:
         try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_menu_msg_id)
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id, message_id=last_menu_msg_id
+            )
         except Exception:
             pass
 
@@ -1266,7 +1309,8 @@ async def mobin_mode_instant(update: Update, context):
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1283,7 +1327,8 @@ async def mobin_mode_delayed(update: Update, context):
         "<i>زمان کل را به ثانیه تایپ کنید:</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_DELAY
@@ -1314,7 +1359,8 @@ async def mobin_delay_seconds(update: Update, context):
         f"<i>عدد را همینجا تایپ کنید.</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ لغو", callback_data="mobin_cancel_action")]
+            [InlineKeyboardButton(
+                "❌ لغو", callback_data="mobin_cancel_action")]
         ]),
     )
     return MOBIN_REACTION_WAITING_ACCOUNTS
@@ -1322,6 +1368,13 @@ async def mobin_delay_seconds(update: Update, context):
 
 async def mobin_cb(update: Update, context):
     q = update.callback_query
+
+    # بررسی ادمین بودن قبل از هر کاری
+    user_id = q.from_user.id if q.from_user else 0
+    if not _is_admin(user_id):
+        await q.answer("⛔️ این پنل خصوصی است.", show_alert=True)
+        return ConversationHandler.END
+
     await q.answer()
     data = q.data
 
@@ -1340,7 +1393,6 @@ async def mobin_cb(update: Update, context):
         )
         return MOBIN_ROOT
 
-    # لغو تسک پس‌زمینه تاخیری از طریق دکمه اختصاصی
     if data.startswith("mobin_cancel_bg_"):
         task_id = data[len("mobin_cancel_bg_"):]
         if task_id in _bg_tasks:
@@ -1351,13 +1403,13 @@ async def mobin_cb(update: Update, context):
         await _send_main_menu(update, context)
         return MOBIN_ROOT
 
-    # مشاهده لیست تسک‌های در حال اجرا در پس‌زمینه
     if data == "mobin_list_bg_tasks":
         if not _bg_tasks:
             await q.message.edit_text(
                 "ℹ️ در حال حاضر هیچ عملیات تاخیری در حال اجرایی وجود ندارد.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+                    [InlineKeyboardButton(
+                        "🔙 بازگشت به پنل", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1367,10 +1419,13 @@ async def mobin_cb(update: Update, context):
         for tid, tinfo in list(_bg_tasks.items()):
             label = tinfo.get("label", "ری‌اکشن")
             count = tinfo.get("count", 0)
-            lines.append(f"• <b>{label}</b> روی {count} سشن (کد: <code>{tid[-4:]}</code>)")
-            kb.append([InlineKeyboardButton(f"🛑 لغو: {label} ({tid[-4:]})", callback_data=f"mobin_cancel_bg_{tid}")])
+            lines.append(
+                f"• <b>{label}</b> روی {count} سشن (کد: <code>{tid[-4:]}</code>)")
+            kb.append([InlineKeyboardButton(
+                f"🛑 لغو: {label} ({tid[-4:]})", callback_data=f"mobin_cancel_bg_{tid}")])
 
-        kb.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")])
+        kb.append([InlineKeyboardButton(
+            "🔙 بازگشت به پنل", callback_data="mobin_back")])
         await q.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
         return MOBIN_ROOT
 
@@ -1409,21 +1464,27 @@ async def mobin_cb(update: Update, context):
             f"✅ سشن‌های سالم و فعال: <b>{res['active']}</b>",
         ]
         if res["revoked"]:
-            report_lines.append(f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
+            report_lines.append(
+                f"\n🚫 حذف‌شده (غیرفعال/بن/لاگ‌اوت): <b>{len(res['revoked'])}</b>")
             for name in res["revoked"][:6]:
                 report_lines.append(f"  • <code>{name}</code>")
             if len(res["revoked"]) > 6:
-                report_lines.append(f"  ... و {len(res['revoked']) - 6} مورد دیگر")
+                report_lines.append(
+                    f"  ... و {len(res['revoked']) - 6} مورد دیگر")
 
         if res["duplicates"]:
-            report_lines.append(f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
+            report_lines.append(
+                f"\n🔁 حذف‌شده (اکانت تکراری): <b>{len(res['duplicates'])}</b>")
             for dup_name, orig_name, uid in res["duplicates"][:6]:
-                report_lines.append(f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
+                report_lines.append(
+                    f"  • <code>{dup_name}</code> (تکرار <code>{orig_name}</code>)")
             if len(res["duplicates"]) > 6:
-                report_lines.append(f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
+                report_lines.append(
+                    f"  ... و {len(res['duplicates']) - 6} مورد دیگر")
 
         if not res["revoked"] and not res["duplicates"]:
-            report_lines.append("\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
+            report_lines.append(
+                "\n✨ تمام سشن‌ها کاملاً سالم، معتبر و بدون تکرار هستند.")
 
         try:
             await prog.edit_text("\n".join(report_lines), parse_mode="HTML", reply_markup=_main_kb())
@@ -1522,7 +1583,8 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 هیچ سشنی موجود نیست.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton(
+                        "🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1535,7 +1597,8 @@ async def mobin_cb(update: Update, context):
         for name in names[:30]:
             uid = await _session_user_id(name)
             uid_str = str(uid) if uid else "نامعتبر/غیرمجاز"
-            lines.append(f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
+            lines.append(
+                f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
         if len(names) > 30:
             lines.append(f"\n... و {len(names) - 30} تای دیگر")
 
@@ -1569,7 +1632,8 @@ async def mobin_cb(update: Update, context):
             await q.message.edit_text(
                 "🗂 همه سشن‌ها حذف شدند.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
+                    [InlineKeyboardButton(
+                        "🔙 بازگشت", callback_data="mobin_back")]
                 ]),
             )
             return MOBIN_ROOT
@@ -1603,6 +1667,10 @@ async def mobin_cb(update: Update, context):
 
 # ---------- هدف ری‌اکشن ----------
 async def mobin_rx_target(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     msg = update.message
     text = (msg.text or "").strip()
 
@@ -1698,6 +1766,10 @@ async def _start_reaction_scan(update, context, peer, msg_id, forward_info):
 
 # ---------- هدف برداشتن ری‌اکشن ----------
 async def mobin_remove_target(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     msg = update.message
     text = (msg.text or "").strip()
 
@@ -1768,7 +1840,8 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
             f"ℹ️ هیچ سشنی روی این پست ری‌اکشن ندارد — موردی برای حذف نیست.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
+                [InlineKeyboardButton(
+                    "🔙 بازگشت به پنل", callback_data="mobin_back")]
             ]),
         )
         return MOBIN_ROOT
@@ -1785,6 +1858,10 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
 
 # ---------- اجرا ----------
 async def mobin_rx_count(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     text = (update.message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
         await update.message.reply_text(
@@ -1911,8 +1988,10 @@ async def mobin_rx_count(update: Update, context):
             f"<i>ربات کاملاً آزاد است. می‌توانید منوی اصلی را ببینید، سفارش دیگری ثبت کنید یا این عملیات را لغو نمایید.</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🛑 لغو این عملیات تاخیری", callback_data=f"mobin_cancel_bg_{task_id}")],
-                [InlineKeyboardButton("🎛 بازگشت به منوی اصلی", callback_data="mobin_back")],
+                [InlineKeyboardButton(
+                    "🛑 لغو این عملیات تاخیری", callback_data=f"mobin_cancel_bg_{task_id}")],
+                [InlineKeyboardButton(
+                    "🎛 بازگشت به منوی اصلی", callback_data="mobin_back")],
             ])
         )
 
@@ -2010,9 +2089,12 @@ async def mobin_rx_count(update: Update, context):
     return MOBIN_ROOT
 
 
-
 # ---------- وارد کردن بکاپ ----------
 async def mobin_import_zip(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     doc = update.message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
         await update.message.reply_text(
@@ -2051,6 +2133,10 @@ async def mobin_import_zip(update: Update, context):
 
 # ---------- اضافه کردن سشن‌ها با ZIP ----------
 async def mobin_add_sessions_zip(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     doc = update.message.document
     if not doc or not (doc.file_name or "").lower().endswith(".zip"):
         await update.message.reply_text(
@@ -2104,6 +2190,10 @@ async def mobin_add_sessions_zip(update: Update, context):
 
 
 async def mobin_cancel(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(user_id):
+        return ConversationHandler.END
+
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
         ev.set()
@@ -2118,8 +2208,9 @@ async def mobin_cancel(update: Update, context):
 def build_mobin_handler():
     """
     پیکربندی هندلر:
-    - با ارسال /mobin پنل بدون نیاز به رمز باز می‌شود.
-    - با ارسال /start در هر مرحله‌ای، پنل ریست شده و ربات کاملاً به حالت عادی برمی‌گردد.
+    - با ارسال /mobin پنل فقط برای ادمین‌ها باز می‌شود.
+    - با ارسال /start در هر مرحله‌ای، پنل ریست می‌شود.
+    - سایر callbackها و هندلرها هم بررسی ادمین دارند.
     """
     start_cmd_handler = CommandHandler("start", mobin_start_reset)
 
@@ -2136,9 +2227,11 @@ def build_mobin_handler():
             ],
             MOBIN_REACTION_WAITING_TARGET: [
                 start_cmd_handler,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_target),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_rx_target),
                 MessageHandler(filters.FORWARDED, mobin_rx_target),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI: [
                 start_cmd_handler,
@@ -2150,14 +2243,18 @@ def build_mobin_handler():
             ],
             MOBIN_REACTION_WAITING_DELAY: [
                 start_cmd_handler,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_delay_seconds),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_delay_seconds),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_REMOVE: [
                 start_cmd_handler,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_remove_target),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_remove_target),
                 MessageHandler(filters.FORWARDED, mobin_remove_target),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_REACTION_WAITING_EMOJI_CHOICE: [
                 start_cmd_handler,
@@ -2165,23 +2262,27 @@ def build_mobin_handler():
             ],
             MOBIN_REACTION_WAITING_ACCOUNTS: [
                 start_cmd_handler,
-                MessageHandler(filters.TEXT & ~filters.COMMAND, mobin_rx_count),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               mobin_rx_count),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_IMPORT_ZIP: [
                 start_cmd_handler,
                 MessageHandler(filters.Document.ALL, mobin_import_zip),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
             MOBIN_WAITING_ADD_SESSION_ZIP: [
                 start_cmd_handler,
                 MessageHandler(filters.Document.ALL, mobin_add_sessions_zip),
-                CallbackQueryHandler(mobin_cb, pattern=r"^mobin_cancel_action$"),
+                CallbackQueryHandler(
+                    mobin_cb, pattern=r"^mobin_cancel_action$"),
             ],
         },
         fallbacks=[
             start_cmd_handler,
-            CommandHandler("cancel", mobin_cancel)
+            CommandHandler("cancel", mobin_cancel),
         ],
         allow_reentry=True,
     )
