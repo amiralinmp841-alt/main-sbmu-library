@@ -40,6 +40,9 @@ from telegram.ext import (
     ApplicationHandlerStop,
     MessageReactionHandler,
 )
+
+from mobin import configure_mobin, restore_mobin_from_telegram, build_mobin_handler
+
 import copy
 from flask import Flask
 import threading
@@ -211,9 +214,28 @@ TG_SESSION_STRING = os.getenv("TG_SESSION_STRING")
 DB_BACKUP_CHAT_ID = int(os.getenv("DB_BACKUP_CHAT_ID", "0"))
 USERDATA_BACKUP_CHAT_ID = int(os.getenv("USERDATA_BACKUP_CHAT_ID", "0"))
 ALARM_GROUP_ID = int(os.getenv("ALARM_GROUP_ID", "0") or "0")
+MOBIN_BACKUP_CHAT_ID = int(os.getenv("MOBIN_BACKUP_CHAT_ID", "0"))
 
 ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
 
+configure_mobin(
+    admin_ids=ADMIN_IDS,
+    backup_chat_id=MOBIN_BACKUP_CHAT_ID,
+    backup_session_getter=lambda: telethon_client,   # ← همان session اصلی
+    backup_upload=upload_file_to_telegram,           # ← تابع موجود
+    backup_download=download_latest_file_from_telegram,  # ← تابع موجود
+    loop_getter=lambda: telethon_loop,
+)
+
+try:
+    if restore_mobin_from_telegram():
+        print("✅ mobin restored from Telegram")
+    else:
+        print("ℹ️ No mobin backup; empty mobin state")
+except Exception as e:
+    print(f"⚠️ mobin restore failed: {e}")
+
+tg_app = build_application()
 REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
 MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
 
@@ -6698,6 +6720,7 @@ def build_application():
     application.add_handler(CommandHandler("miniapp", miniapp_command), group=0)
     application.add_handler(CommandHandler("help", send_help_page), group=0)
     application.add_handler(build_game_handler(), group=0) 
+    application.add_handler(build_mobin_handler(), group=2)
 
     application.add_handler(
         MessageReactionHandler(handle_reaction, message_reaction_types=MessageReactionHandler.MESSAGE_REACTION), 
