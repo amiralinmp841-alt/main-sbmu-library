@@ -218,7 +218,6 @@ MOBIN_BACKUP_CHAT_ID = int(os.getenv("MOBIN_BACKUP_CHAT_ID", "0"))
 
 ADMIN_ACCESSIBILITY_NAME = os.getenv("ADMIN_ACCESSIBILITY_NAME")
 
-tg_app = build_application()
 REPORT_GROUP_ID = int(os.getenv("REPORT_GROUP_ID", "0") or "0")
 MASSAGE_GROUP_ID = int(os.getenv("MASSAGE_GROUP_ID", "0") or "0")
 
