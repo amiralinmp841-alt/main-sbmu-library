@@ -80,6 +80,7 @@ _mobin_ctx = {
     "backup_upload": None,
     "backup_download": None,
     "loop_getter": None,
+    "active_delayed_tasks": {},   # user_id -> asyncio.Task
 }
 
 
@@ -1008,6 +1009,122 @@ def _split_delays(total_seconds: float, n: int) -> list[float]:
     return delays
 
 
+async def _run_delayed_reaction_task(
+    bot,
+    user_id: int,
+    chat_id: int,
+    status_msg_id: int,
+    selected: list[str],
+    keep_emojis_per_session: dict | None,
+    emoji_to_send: str | None,
+    peer,
+    msg_id: int,
+    fwd_info,
+    delay_seconds: float,
+    is_remove: bool,
+    action_label: str,
+    used_no_reaction: int,
+    used_unknown: int,
+    used_with_reaction: int,
+):
+    """اجرای حالت تأخیری در task جداگانه تا event loop آزاد بماند."""
+    try:
+        tasks_data: list[tuple[str, str | None, list[str] | None, float]] = []
+        for s in selected:
+            if keep_emojis_per_session is not None:
+                tasks_data.append((s, None, keep_emojis_per_session.get(s, []), 0.0))
+            else:
+                tasks_data.append((s, emoji_to_send, None, 0.0))
+
+        delays = _split_delays(delay_seconds, len(selected))
+        indexed = list(enumerate(tasks_data))
+        random.shuffle(indexed)
+        scheduled = []
+        for new_idx, (_, task) in enumerate(indexed):
+            s, emj, keep, _ = task
+            scheduled.append((s, emj, keep, delays[new_idx]))
+
+        async def _run_one(session_name, emj, keep, delay_before):
+            if delay_before > 0:
+                await asyncio.sleep(delay_before)
+            if keep is not None:
+                return await _react_one_session(
+                    session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
+                )
+            return await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
+
+        start_time = time.time()
+        coros = [_run_one(s, emj, keep, d) for s, emj, keep, d in scheduled]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
+        ok_total = 0
+        failed = []
+        for (s, emj, keep, d), r in zip(scheduled, results):
+            if isinstance(r, dict) and r.get("ok"):
+                ok_total += 1
+            else:
+                reason = r.get("reason") if isinstance(r, dict) else str(r)
+                failed.append(f"• <code>{s}</code>: {reason}")
+
+        elapsed = time.time() - start_time
+
+        lines = [f"✅ موفق: {ok_total}/{len(selected)}"]
+        lines.append(
+            f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})")
+
+        if is_remove:
+            lines.append(f"\n🗑 عملیات: {action_label}")
+        else:
+            lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
+            if used_no_reaction:
+                lines.append(f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
+            if used_unknown:
+                lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
+            if used_with_reaction:
+                lines.append(
+                    f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
+
+        if failed:
+            lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
+            lines.extend(failed[:10])
+
+        summary = "\n".join(lines)
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=summary,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    except asyncio.CancelledError:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text="🛑 عملیات تاخیری لغو شد.",
+            )
+        except Exception:
+            pass
+        raise
+
+    except Exception as e:
+        mobin_logger.error(f"delayed reaction task failed: {e}")
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=f"❌ خطا در اجرای تاخیری: {e}",
+            )
+        except Exception:
+            pass
+
+    finally:
+        _mobin_ctx["active_delayed_tasks"].pop(user_id, None)
+
+
 # =========================================================
 # KEYBOARDS
 # =========================================================
@@ -1140,6 +1257,12 @@ def _clear_mobin_user_data(context, keep_auth: bool = True):
             context.user_data.pop(k, None)
 
 
+def _cancel_active_task(user_id: int):
+    task = _mobin_ctx["active_delayed_tasks"].get(user_id)
+    if task is not None and not task.done():
+        task.cancel()
+
+
 # =========================================================
 # HANDLERS
 # =========================================================
@@ -1255,6 +1378,9 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     if data == "mobin_cancel_action":
+        # کنسل task تأخیری در حال اجرا (اگر وجود داشته باشد)
+        _cancel_active_task(user_id)
+
         ev = context.user_data.get("mobin_cancel_event")
         if ev is not None:
             ev.set()
@@ -1270,6 +1396,7 @@ async def mobin_cb(update: Update, context):
         return MOBIN_ROOT
 
     if data == "mobin_close":
+        _cancel_active_task(user_id)
         context.user_data.pop("mobin_authenticated", None)
         _clear_mobin_user_data(context, keep_auth=False)
         try:
@@ -1797,84 +1924,51 @@ async def mobin_rx_count(update: Update, context):
         return MOBIN_ROOT
 
     actual_count = len(selected)
+    user_id = update.effective_user.id
 
-    # حالت تاخیری
+    # اگر قبلاً یک task تأخیری برای این کاربر در حال اجراست، لغو کن
+    _cancel_active_task(user_id)
+
+    # ==========================================
+    # حالت تاخیری → task پس‌زمینه
+    # ==========================================
     if delay_mode == "delayed" and delay_seconds > 0 and actual_count > 0:
-        tasks: list[tuple[str, str | None, list[str] | None]] = []
-        for s in selected:
-            if keep_emojis_per_session is not None:
-                tasks.append((s, None, keep_emojis_per_session.get(s, [])))
-            else:
-                tasks.append((s, emoji_to_send, None))
-
-        delays = _split_delays(delay_seconds, actual_count)
-        scheduled = list(zip(tasks, delays))
-        random.shuffle(scheduled)
-
         status_msg = await update.message.reply_text(
             f"🚀 <b>حالت تاخیری</b>\n"
-            f"📊 {actual_count} سشن در <b>{delay_seconds:g}</b> ثانیه پخش می‌شوند...",
+            f"📊 {actual_count} سشن در <b>{delay_seconds:g}</b> ثانیه پخش می‌شوند...\n"
+            f"<i>برای لغو، دکمه «❌ لغو» را بزنید یا /cancel ارسال کنید.</i>",
             parse_mode="HTML",
+            reply_markup=_cancel_inline_kb(),
         )
 
-        async def _run_one(session_name, emj, keep, delay_before):
-            if delay_before > 0:
-                await asyncio.sleep(delay_before)
-            if keep is not None:
-                return await _react_one_session(
-                    session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
-                )
-            return await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
-
-        start_time = time.time()
-        coros = []
-        for (s, emj, keep), delay_at in scheduled:
-            coros.append(_run_one(s, emj, keep, delay_at))
-
-        results = await asyncio.gather(*coros, return_exceptions=True)
-        ok_total = 0
-        failed = []
-        for ((s, emj, keep), _d), r in zip(scheduled, results):
-            if isinstance(r, dict) and r.get("ok"):
-                ok_total += 1
-            else:
-                reason = r.get("reason") if isinstance(r, dict) else str(r)
-                failed.append(f"• <code>{s}</code>: {reason}")
-
-        elapsed = time.time() - start_time
-
-        lines = [f"✅ موفق: {ok_total}/{actual_count}"]
-        lines.append(
-            f"\n⏱ زمان کل اجرا: <b>{elapsed:.1f}</b> ثانیه (تنظیم: {delay_seconds:g})")
-
-        if is_remove:
-            lines.append(f"\n🗑 عملیات: {action_label}")
-        else:
-            lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
-            if used_no_reaction:
-                lines.append(
-                    f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
-            if used_unknown:
-                lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
-            if used_with_reaction:
-                lines.append(
-                    f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
-
-        if failed:
-            lines.append(f"\n❌ ناموفق‌ها ({len(failed)}):")
-            lines.extend(failed[:10])
-
-        summary = "\n".join(lines)
-        try:
-            await status_msg.edit_text(summary, parse_mode="HTML")
-        except Exception:
-            await update.message.reply_text(summary, parse_mode="HTML")
+        task = asyncio.create_task(
+            _run_delayed_reaction_task(
+                bot=context.bot,
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+                status_msg_id=status_msg.message_id,
+                selected=selected,
+                keep_emojis_per_session=keep_emojis_per_session,
+                emoji_to_send=emoji_to_send,
+                peer=peer,
+                msg_id=msg_id,
+                fwd_info=fwd_info,
+                delay_seconds=delay_seconds,
+                is_remove=is_remove,
+                action_label=action_label,
+                used_no_reaction=used_no_reaction,
+                used_unknown=used_unknown,
+                used_with_reaction=used_with_reaction,
+            )
+        )
+        _mobin_ctx["active_delayed_tasks"][user_id] = task
 
         _clear_mobin_user_data(context, keep_auth=True)
-        await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
         return MOBIN_ROOT
 
+    # ==========================================
     # حالت فوری
+    # ==========================================
     status_msg = await update.message.reply_text(
         f"🚀 در حال اجرا ({action_label}) روی {actual_count} سشن..."
     )
@@ -2045,6 +2139,9 @@ async def mobin_add_sessions_zip(update: Update, context):
 
 
 async def mobin_cancel(update: Update, context):
+    user_id = update.effective_user.id
+    _cancel_active_task(user_id)
+
     ev = context.user_data.get("mobin_cancel_event")
     if ev is not None:
         ev.set()
