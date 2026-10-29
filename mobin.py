@@ -9,6 +9,7 @@ import io as iolib
 import html
 import random
 import time
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 
@@ -49,7 +50,7 @@ _reactions_cache = {
     "ttl": 12 * 60 * 60,
 }
 
-# لیست پیش‌فرض امن
+# لیست پیش‌فرض امن — فقط زمانی استفاده می‌شه که هیچ سشنی موجود نباشه
 _FALLBACK_EMOJIS = [
     "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔",
     "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩",
@@ -159,6 +160,49 @@ def delete_all_sessions() -> int:
     return count
 
 # =========================================================
+# SESSION user_id EXTRACTION
+# =========================================================
+async def _session_user_id(session_name: str) -> int | None:
+    """
+    user_id عددی داخل فایل .session را برمی‌گرداند.
+    اگه نامعتبر/غیرمجاز/آسیب‌دیده باشه None برمی‌گردونه.
+    """
+    data = load_mobin_data()
+    api_id = data.get("api_id", 2040)
+    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+    sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{session_name}.session")
+    if not os.path.exists(sess_path):
+        return None
+
+    client = TelegramClient(sess_path, api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return None
+        me = await client.get_me()
+        if me is None:
+            return None
+        return int(me.id)
+    except Exception as e:
+        mobin_logger.debug(f"_session_user_id({session_name}) failed: {e}")
+        return None
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _existing_session_user_ids() -> dict[int, str]:
+    """mapping: user_id → session_name برای همه سشن‌های محلی."""
+    mapping: dict[int, str] = {}
+    for name in list_sessions():
+        uid = await _session_user_id(name)
+        if uid is not None:
+            mapping[uid] = name
+    return mapping
+
+# =========================================================
 # ANTI-DUPLICATE SESSION IMPORT
 # =========================================================
 def _sha256_bytes(data: bytes) -> str:
@@ -187,7 +231,12 @@ def _next_session_name() -> str:
             return candidate
         i += 1
 
-def import_sessions_zip(raw_bytes: bytes) -> dict:
+async def import_sessions_zip(raw_bytes: bytes) -> dict:
+    """
+    ZIP را پردازش می‌کنه با دو لایه چک تکراری:
+      1) hash محتوای فایل (سریع)
+      2) user_id عددی داخل session (دقیق — برای session‌هایی که با reconnect hash‌شون عوض شده)
+    """
     imported: list[tuple[str, str]] = []
     skipped_existing: list[tuple[str, str]] = []
     skipped_duplicate_in_zip: list[tuple[str, str]] = []
@@ -197,8 +246,9 @@ def import_sessions_zip(raw_bytes: bytes) -> dict:
         os.makedirs(MOBIN_SESSIONS_DIR, exist_ok=True)
 
     existing_hashes = _existing_session_hashes()
-    seen_in_zip: dict[str, str] = {}
 
+    # مرحله ۱: استخراج محتوا و hash از ZIP
+    entries: list[tuple[str, bytes, str]] = []
     try:
         with zipfile.ZipFile(iolib.BytesIO(raw_bytes)) as zf:
             for entry in zf.namelist():
@@ -210,32 +260,70 @@ def import_sessions_zip(raw_bytes: bytes) -> dict:
                 except Exception as e:
                     errors.append(f"{base}: خواندن خطا ({e})")
                     continue
-
-                content_hash = _sha256_bytes(data)
-
-                if content_hash in existing_hashes:
-                    skipped_existing.append((base, "session از قبل موجود است"))
-                    continue
-                if content_hash in seen_in_zip:
-                    skipped_duplicate_in_zip.append((base, seen_in_zip[content_hash]))
-                    continue
-                seen_in_zip[content_hash] = base
-
-                new_name = _next_session_name()
-                final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{new_name}.session")
-                try:
-                    with open(final_path, "wb") as f:
-                        f.write(data)
-                    imported.append((new_name, base))
-                    existing_hashes.add(content_hash)
-                except Exception as e:
-                    errors.append(f"{base}: نوشتن خطا ({e})")
+                entries.append((base, data, _sha256_bytes(data)))
     except zipfile.BadZipFile as e:
         return {"imported": [], "skipped_existing": [],
                 "skipped_duplicate_in_zip": [], "errors": [f"ZIP معیوب: {e}"]}
     except Exception as e:
         return {"imported": [], "skipped_existing": [],
                 "skipped_duplicate_in_zip": [], "errors": [f"خطای کلی: {e}"]}
+
+    # مرحله ۲: user_id سشن‌های موجود
+    existing_user_ids = await _existing_session_user_ids()
+
+    # مرحله ۳: پردازش هر ورودی
+    seen_in_zip_hash: dict[str, str] = {}
+    seen_in_zip_uid: dict[int, str] = {}
+
+    for base, data, content_hash in entries:
+        # چک hash
+        if content_hash in existing_hashes:
+            skipped_existing.append((base, "session از قبل موجود است (hash یکسان)"))
+            continue
+        if content_hash in seen_in_zip_hash:
+            skipped_duplicate_in_zip.append((base, seen_in_zip_hash[content_hash]))
+            continue
+
+        # موقت بنویس تا user_id استخراج بشه
+        new_name = _next_session_name()
+        final_path = os.path.join(MOBIN_SESSIONS_DIR, f"{new_name}.session")
+        try:
+            with open(final_path, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            errors.append(f"{base}: نوشتن خطا ({e})")
+            continue
+
+        # چک user_id عددی
+        uid = await _session_user_id(new_name)
+
+        if uid is not None:
+            if uid in existing_user_ids:
+                try:
+                    os.remove(final_path)
+                except Exception:
+                    pass
+                skipped_existing.append(
+                    (base, f"همون اکانت (user_id={uid}) قبلاً هست: {existing_user_ids[uid]}")
+                )
+                continue
+            if uid in seen_in_zip_uid:
+                try:
+                    os.remove(final_path)
+                except Exception:
+                    pass
+                skipped_duplicate_in_zip.append(
+                    (base, f"همون اکانت داخل ZIP: {seen_in_zip_uid[uid]} (user_id={uid})")
+                )
+                continue
+            seen_in_zip_uid[uid] = base
+            existing_user_ids[uid] = new_name
+        else:
+            mobin_logger.warning(f"import: user_id استخراج نشد برای {base} (session شاید نامعتبر)")
+
+        seen_in_zip_hash[content_hash] = base
+        existing_hashes.add(content_hash)
+        imported.append((new_name, base))
 
     return {
         "imported": imported,
@@ -257,9 +345,9 @@ def _format_import_report(result: dict) -> str:
         if len(imported) > 8:
             lines.append(f"  ... و {len(imported) - 8} تای دیگر")
     if skipped_existing:
-        lines.append(f"\n🆔 رد شد (session از قبل موجود): {len(skipped_existing)}")
-        for name, _ in skipped_existing[:5]:
-            lines.append(f"  • <code>{name}</code>")
+        lines.append(f"\n🆔 رد شد (از قبل موجود): {len(skipped_existing)}")
+        for name, reason in skipped_existing[:5]:
+            lines.append(f"  • <code>{name}</code> — {reason}")
     if skipped_dup:
         lines.append(f"\n🔁 رد شد (تکراری داخل ZIP): {len(skipped_dup)}")
         for name, first in skipped_dup[:5]:
@@ -318,7 +406,16 @@ def restore_mobin_from_telegram() -> bool:
             return False
         with open(MOBIN_RESTORE_ZIP, "rb") as f:
             raw = f.read()
-        result = import_sessions_zip(raw)
+        # اجرای import در event loop جدید (restore از startup همگام صدا زده می‌شه)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    result = ex.submit(lambda: asyncio.run(import_sessions_zip(raw))).result()
+            else:
+                result = loop.run_until_complete(import_sessions_zip(raw))
+        except RuntimeError:
+            result = asyncio.run(import_sessions_zip(raw))
         mobin_logger.info(
             f"✅ mobin restored — imported={len(result['imported'])}, "
             f"skipped_existing={len(result['skipped_existing'])}, "
@@ -330,20 +427,22 @@ def restore_mobin_from_telegram() -> bool:
         return False
 
 # =========================================================
-# AVAILABLE REACTIONS (per-channel)
+# AVAILABLE REACTIONS (per-channel) — فقط مجازهای همان کانال
 # =========================================================
 async def _get_channel_reactions(
     peer_str: str | None = None,
     forward_info: dict | None = None,
 ) -> list[str]:
     """
-    ری‌اکشن‌های مجاز مخصوص یک کانال/گروه را برمی‌گرداند.
-    - اگر کانال تنظیمات ری‌اکشن نداشته باشه، لیست سراسری fallback می‌شه.
-    - اگر `chatReactionsNone` باشه، لیست خالی برمی‌گرده.
+    فقط ری‌اکشن‌های مجازِ همان کانال/گروه را برمی‌گرداند.
+    - chatReactionsNone → []
+    - chatReactionsAll → لیست سراسری
+    - chatReactionsSome → فقط همون‌ها
+    - خطا / نامشخص → [] (هیچ fallback به ایموجی‌های پیش‌فرض)
     """
     sessions = list_sessions()
     if not sessions:
-        return list(_FALLBACK_EMOJIS)
+        return []
 
     data = load_mobin_data()
     api_id = data.get("api_id", 2040)
@@ -354,9 +453,8 @@ async def _get_channel_reactions(
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            return list(_FALLBACK_EMOJIS)
+            return []
 
-        # entity رو resolve کن
         entity = None
         if forward_info:
             try:
@@ -370,53 +468,45 @@ async def _get_channel_reactions(
                 entity = None
 
         if entity is None:
-            return list(_FALLBACK_EMOJIS)
+            return []
 
-        # گرفتن full info کانال/گروه
+        chat_reactions = None
         try:
             full = await client(functions.channels.GetFullChannelRequest(entity))
             chat_reactions = getattr(full.full_chat, "available_reactions", None)
         except Exception:
-            # شاید گروه معمولی باشه (نه کانال)
             try:
                 full = await client(functions.messages.GetFullChatRequest(entity.id))
                 chat_reactions = getattr(full.full_chat, "available_reactions", None)
             except Exception:
                 chat_reactions = None
 
+        # هیچ تنظیمی نداره → یعنی همه ری‌اکشن‌های سراسری مجازن
         if chat_reactions is None:
-            # کانال تنظیمات خاصی نداره → لیست سراسری
             return await _get_global_reactions(client)
 
-        # تشخیص نوع ChatReactions
         class_name = type(chat_reactions).__name__
 
         if "None" in class_name:
-            # هیچ ری‌اکشنی مجاز نیست
             return []
 
         if "All" in class_name:
-            # همه ری‌اکشن‌های سراسری مجازن
             return await _get_global_reactions(client)
 
         if "Some" in class_name:
-            # فقط بعضی‌ها
-            reactions = getattr(chat_reactions, "reactions", [])
+            reactions = getattr(chat_reactions, "reactions", []) or []
             emojis = []
             for r in reactions:
                 emoticon = getattr(r, "emoticon", None)
                 if emoticon:
                     emojis.append(emoticon)
-            if emojis:
-                return emojis
-            return []
+            return emojis  # ← حتی اگه خالی باشه، fallback نمی‌کنیم
 
-        # پیش‌فرض
-        return await _get_global_reactions(client)
+        return []
 
     except Exception as e:
         mobin_logger.error(f"get_channel_reactions failed: {e}")
-        return list(_FALLBACK_EMOJIS)
+        return []
     finally:
         try:
             await client.disconnect()
@@ -425,7 +515,7 @@ async def _get_channel_reactions(
 
 
 async def _get_global_reactions(client) -> list[str]:
-    """لیست سراسری ری‌اکشن‌های مجاز تلگرام."""
+    """لیست سراسری ری‌اکشن‌های مجاز تلگرام (فقط برای chatReactionsAll)."""
     now = time.time()
     if (_reactions_cache["list"] is not None
             and now - _reactions_cache["fetched_at"] < _reactions_cache["ttl"]):
@@ -702,6 +792,7 @@ async def mobin_cb(update: Update, context):
             "• <b>لینک پست</b> (مثل <code>https://t.me/chan/123</code>)\n"
             "• <b>@username</b> کانال (آخرین پست)\n"
             "• <b>فوروارد/کپی</b> کردن پست از کانال به اینجا\n\n"
+            "فقط ری‌اکشن‌هایی که خود کانال مجاز کرده نمایش داده می‌شود.\n\n"
             "برای انصراف «❌ لغو» را بفرستید.",
             parse_mode="HTML",
             reply_markup=_cancel_kb(),
@@ -741,8 +832,10 @@ async def mobin_cb(update: Update, context):
             "<b>نحوه کار:</b>\n"
             "• اسم فایل‌های داخل ZIP مهم نیست\n"
             "• خودش اسم می‌ده: <code>acc_0001</code>، <code>acc_0002</code>، ...\n"
-            "• اگه session تکراری (بر اساس محتوا) باشه، skip می‌شه\n"
-            "• هم با session‌های موجود چک می‌شه، هم داخل خود ZIP\n\n"
+            "• اگه session تکراری باشه skip می‌شه — دو لایه:\n"
+            "  1️⃣ hash محتوای فایل\n"
+            "  2️⃣ user_id عددی داخل session (حتی اگه hash فرق کنه)\n"
+            "• هم با سشن‌های موجود چک می‌شه، هم داخل خود ZIP\n\n"
             f"مقدار فعلی: <code>API_ID={load_mobin_data().get('api_id')}</code>",
             parse_mode="HTML",
             reply_markup=_cancel_kb(),
@@ -759,9 +852,22 @@ async def mobin_cb(update: Update, context):
                 ]),
             )
             return MOBIN_ROOT
+
+        # ساخت لیست با user_id عددی
         await q.message.edit_text(
-            f"🗂 <b>سشن‌های فعال ({len(names)})</b>\n\n"
-            "روی هر کدام بزنید تا حذف شود:",
+            f"⏳ در حال خواندن user_id سشن‌ها ({len(names)})...",
+            parse_mode="HTML",
+        )
+        lines = [f"🗂 <b>سشن‌های فعال ({len(names)})</b>\n"]
+        for name in names[:30]:
+            uid = await _session_user_id(name)
+            uid_str = str(uid) if uid else "نامعتبر/غیرمجاز"
+            lines.append(f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
+        if len(names) > 30:
+            lines.append(f"\n... و {len(names) - 30} تای دیگر")
+
+        await q.message.edit_text(
+            "\n".join(lines),
             parse_mode="HTML",
             reply_markup=_sessions_kb(),
         )
@@ -845,7 +951,9 @@ async def mobin_rx_target(update: Update, context):
         emojis = await _get_channel_reactions(forward_info=fwd)
         if not emojis:
             await msg.reply_text(
-                "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
+                "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
+                "یا نتونستم به تنظیمات ری‌اکشن کانال دسترسی پیدا کنم.\n"
+                "برای انصراف «❌ لغو» را بفرستید.",
                 reply_markup=_cancel_kb(),
             )
             return MOBIN_REACTION_WAITING_TARGET
@@ -872,7 +980,9 @@ async def mobin_rx_target(update: Update, context):
     emojis = await _get_channel_reactions(peer_str=peer)
     if not emojis:
         await msg.reply_text(
-            "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
+            "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.\n"
+            "یا نتونستم به تنظیمات ری‌اکشن کانال دسترسی پیدا کنم.\n"
+            "برای انصراف «❌ لغو» را بفرستید.",
             reply_markup=_cancel_kb(),
         )
         return MOBIN_REACTION_WAITING_TARGET
@@ -1010,7 +1120,7 @@ async def mobin_import_zip(update: Update, context):
                 with open(MOBIN_DATA_FILE, "wb") as f:
                     f.write(zf.read("mobin.json"))
 
-        result = import_sessions_zip(raw_bytes)
+        result = await import_sessions_zip(raw_bytes)
         _schedule_backup_upload()
         n = len(list_sessions())
         report = _format_import_report(result)
@@ -1037,7 +1147,7 @@ async def mobin_add_sessions_zip(update: Update, context):
 
     status = await update.message.reply_text("⏳ در حال پردازش ZIP...")
 
-    result = import_sessions_zip(raw_bytes)
+    result = await import_sessions_zip(raw_bytes)
 
     if (not result["imported"]
             and not result["skipped_existing"]
