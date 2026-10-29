@@ -6,6 +6,7 @@ import logging
 import zipfile
 import hashlib
 import io as iolib
+import html
 import random
 import time
 from datetime import datetime
@@ -41,14 +42,14 @@ MOBIN_BACKUP_ZIP = "/tmp/mobin_backup.zip"
 MOBIN_RESTORE_ZIP = "/tmp/mobin_restore.zip"
 DEFAULT_PASSWORD = "من مبینم"
 
-# کش برای ری‌اکشن‌های سراسری (فقط برای حالت All)
+# کش برای ری‌اکشن‌های سراسری
 _reactions_cache = {
     "list": None,
     "fetched_at": 0,
     "ttl": 12 * 60 * 60,
 }
 
-# لیست پیش‌فرض امن (فقط اگه هیچ‌چیز جواب نداد)
+# لیست پیش‌فرض امن
 _FALLBACK_EMOJIS = [
     "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔",
     "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩",
@@ -158,37 +159,10 @@ def delete_all_sessions() -> int:
     return count
 
 # =========================================================
-# DEDUP (content-based)
+# ANTI-DUPLICATE SESSION IMPORT
 # =========================================================
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-def dedup_sessions_on_disk() -> dict:
-    if not os.path.isdir(MOBIN_SESSIONS_DIR):
-        return {"removed": [], "kept": 0}
-
-    seen: dict[str, str] = {}
-    removed: list[str] = []
-
-    for name in sorted(list_sessions()):
-        path = os.path.join(MOBIN_SESSIONS_DIR, f"{name}.session")
-        try:
-            with open(path, "rb") as f:
-                h = _sha256_bytes(f.read())
-        except Exception:
-            continue
-
-        if h in seen:
-            try:
-                os.remove(path)
-                removed.append(name)
-                mobin_logger.info(f"🗑 dedup: removed duplicate {name} (same as {seen[h]})")
-            except Exception as e:
-                mobin_logger.error(f"dedup remove failed: {e}")
-        else:
-            seen[h] = name
-
-    return {"removed": removed, "kept": len(seen)}
 
 def _existing_session_hashes() -> set[str]:
     hashes: set[str] = set()
@@ -297,44 +271,6 @@ def _format_import_report(result: dict) -> str:
     return "\n".join(lines)
 
 # =========================================================
-# HEALTH CHECK
-# =========================================================
-async def check_all_sessions_health() -> dict:
-    sessions = list_sessions()
-    data = load_mobin_data()
-    api_id = data.get("api_id", 2040)
-    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
-
-    active, unauthorized, errors = [], [], []
-
-    for name in sessions:
-        sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{name}.session")
-        if not os.path.exists(sess_path):
-            errors.append((name, "file missing"))
-            continue
-        client = TelegramClient(sess_path, api_id, api_hash)
-        try:
-            await client.connect()
-            if await client.is_user_authorized():
-                active.append(name)
-            else:
-                unauthorized.append(name)
-        except Exception as e:
-            errors.append((name, str(e)[:60]))
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-
-    return {
-        "total": len(sessions),
-        "active": active,
-        "unauthorized": unauthorized,
-        "error": errors,
-    }
-
-# =========================================================
 # BACKUP
 # =========================================================
 def _build_backup_zip() -> bytes:
@@ -383,10 +319,10 @@ def restore_mobin_from_telegram() -> bool:
         with open(MOBIN_RESTORE_ZIP, "rb") as f:
             raw = f.read()
         result = import_sessions_zip(raw)
-        dedup_result = dedup_sessions_on_disk()
         mobin_logger.info(
             f"✅ mobin restored — imported={len(result['imported'])}, "
-            f"dedup_removed={len(dedup_result['removed'])}"
+            f"skipped_existing={len(result['skipped_existing'])}, "
+            f"skipped_dup={len(result['skipped_duplicate_in_zip'])}"
         )
         return True
     except Exception as e:
@@ -396,15 +332,14 @@ def restore_mobin_from_telegram() -> bool:
 # =========================================================
 # AVAILABLE REACTIONS (per-channel)
 # =========================================================
-async def _get_available_reactions(
+async def _get_channel_reactions(
     peer_str: str | None = None,
     forward_info: dict | None = None,
 ) -> list[str]:
     """
     ری‌اکشن‌های مجاز مخصوص یک کانال/گروه را برمی‌گرداند.
-    - chatReactionsNone  → لیست خالی
-    - chatReactionsAll   → لیست سراسری (fallback)
-    - chatReactionsSome  → فقط ایموجی‌های همون کانال
+    - اگر کانال تنظیمات ری‌اکشن نداشته باشه، لیست سراسری fallback می‌شه.
+    - اگر `chatReactionsNone` باشه، لیست خالی برمی‌گرده.
     """
     sessions = list_sessions()
     if not sessions:
@@ -421,7 +356,7 @@ async def _get_available_reactions(
         if not await client.is_user_authorized():
             return list(_FALLBACK_EMOJIS)
 
-        # ۱) entity کانال رو resolve کن
+        # entity رو resolve کن
         entity = None
         if forward_info:
             try:
@@ -437,12 +372,12 @@ async def _get_available_reactions(
         if entity is None:
             return list(_FALLBACK_EMOJIS)
 
-        # ۲) full info کانال/گروه رو بگیر
-        chat_reactions = None
+        # گرفتن full info کانال/گروه
         try:
             full = await client(functions.channels.GetFullChannelRequest(entity))
             chat_reactions = getattr(full.full_chat, "available_reactions", None)
         except Exception:
+            # شاید گروه معمولی باشه (نه کانال)
             try:
                 full = await client(functions.messages.GetFullChatRequest(entity.id))
                 chat_reactions = getattr(full.full_chat, "available_reactions", None)
@@ -450,18 +385,22 @@ async def _get_available_reactions(
                 chat_reactions = None
 
         if chat_reactions is None:
+            # کانال تنظیمات خاصی نداره → لیست سراسری
             return await _get_global_reactions(client)
 
-        # ۳) تشخیص نوع ChatReactions
+        # تشخیص نوع ChatReactions
         class_name = type(chat_reactions).__name__
 
         if "None" in class_name:
+            # هیچ ری‌اکشنی مجاز نیست
             return []
 
         if "All" in class_name:
+            # همه ری‌اکشن‌های سراسری مجازن
             return await _get_global_reactions(client)
 
         if "Some" in class_name:
+            # فقط بعضی‌ها
             reactions = getattr(chat_reactions, "reactions", [])
             emojis = []
             for r in reactions:
@@ -472,10 +411,11 @@ async def _get_available_reactions(
                 return emojis
             return []
 
+        # پیش‌فرض
         return await _get_global_reactions(client)
 
     except Exception as e:
-        mobin_logger.error(f"get_available_reactions failed: {e}")
+        mobin_logger.error(f"get_channel_reactions failed: {e}")
         return list(_FALLBACK_EMOJIS)
     finally:
         try:
@@ -485,7 +425,7 @@ async def _get_available_reactions(
 
 
 async def _get_global_reactions(client) -> list[str]:
-    """لیست سراسری ری‌اکشن‌های مجاز تلگرام (fallback)."""
+    """لیست سراسری ری‌اکشن‌های مجاز تلگرام."""
     now = time.time()
     if (_reactions_cache["list"] is not None
             and now - _reactions_cache["fetched_at"] < _reactions_cache["ttl"]):
@@ -622,8 +562,6 @@ def _main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚡ ری‌اکشن فیک", callback_data="mobin_reaction")],
         [InlineKeyboardButton("🚫 برداشتن ری‌اکشن", callback_data="mobin_remove_reaction")],
-        [InlineKeyboardButton("🩺 چک سلامت session‌ها", callback_data="mobin_health")],
-        [InlineKeyboardButton("🗑 حذف sessionهای تکراری", callback_data="mobin_dedup")],
         [InlineKeyboardButton(f"📥 اضافه کردن سشن (ZIP) — {n} فعال", callback_data="mobin_add_sessions")],
         [InlineKeyboardButton(f"🗂 سشن‌های فعال ({n})", callback_data="mobin_sessions_list")],
         [InlineKeyboardButton("📤 دریافت بکاپ", callback_data="mobin_backup_get")],
@@ -636,7 +574,7 @@ def _cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True)
 
 def _emoji_kb(emojis: list[str]) -> InlineKeyboardMarkup:
-    """کیبورد اینلاین با ایموجی‌های مخصوص کانال."""
+    """کیبورد اینلاین با ایموجی‌های مجاز (پویا)."""
     if not emojis:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="mobin_back")]
@@ -690,27 +628,15 @@ async def _send_main_menu(update: Update, context, text="🎛 <b>پنل مبین
             text, parse_mode="HTML", reply_markup=_main_kb(),
         )
 
-async def _auto_dedup_and_report() -> str:
-    res = dedup_sessions_on_disk()
-    if res["removed"]:
-        return (
-            f"\n\n🧹 <b>پاک‌سازی خودکار:</b> {len(res['removed'])} session تکراری حذف شد."
-        )
-    return ""
-
 # =========================================================
 # HANDLERS
 # =========================================================
 async def mobin_cmd(update: Update, context):
     user_id = update.effective_user.id
-
-    dedup_note = await _auto_dedup_and_report()
-
     if _is_admin(user_id):
         context.user_data["mobin_authenticated"] = True
         await update.message.reply_text(
-            "🎛 <b>پنل مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:"
-            + dedup_note,
+            "🎛 <b>پنل مبین</b>\n\nیکی از گزینه‌ها را انتخاب کنید:",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
@@ -729,9 +655,8 @@ async def mobin_password(update: Update, context):
         return ConversationHandler.END
     if _is_password_ok(text):
         context.user_data["mobin_authenticated"] = True
-        dedup_note = await _auto_dedup_and_report()
         await update.message.reply_text(
-            "✅ رمز صحیح است.\n\n🎛 <b>پنل مبین</b>" + dedup_note,
+            "✅ رمز صحیح است.\n\n🎛 <b>پنل مبین</b>",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
@@ -759,160 +684,9 @@ async def mobin_cb(update: Update, context):
         return ConversationHandler.END
 
     if data == "mobin_back":
-        dedup_note = await _auto_dedup_and_report()
-        await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>" + dedup_note)
+        await _send_main_menu(update, context)
         return MOBIN_ROOT
 
-    # =====================================================
-    # 🩺 چک سلامت session‌ها
-    # =====================================================
-    if data == "mobin_health":
-        sessions = list_sessions()
-        if not sessions:
-            await q.message.reply_text("⚠️ هیچ سشنی موجود نیست.")
-            return MOBIN_ROOT
-
-        dedup_res = dedup_sessions_on_disk()
-        sessions = list_sessions()
-
-        status_msg = await q.message.reply_text(
-            f"🩺 در حال چک کردن {len(sessions)} session...\n"
-            "این ممکنه چند لحظه طول بکشه."
-        )
-
-        health = await check_all_sessions_health()
-
-        lines = [f"🩺 <b>گزارش سلامت session‌ها</b>\n"]
-        lines.append(f"📊 مجموع: {health['total']}")
-        lines.append(f"✅ فعال: {len(health['active'])}")
-        lines.append(f"⚠️ غیرفعال (unauthorized): {len(health['unauthorized'])}")
-        lines.append(f"❌ خطا: {len(health['error'])}")
-
-        if dedup_res["removed"]:
-            lines.append(f"\n🧹 تکراری حذف شد: {len(dedup_res['removed'])}")
-
-        if health["unauthorized"]:
-            lines.append("\n<b>غیرفعال‌ها:</b>")
-            for n in health["unauthorized"][:10]:
-                lines.append(f"  • <code>{n}</code>")
-
-        if health["error"]:
-            lines.append("\n<b>خطاها:</b>")
-            for n, r in health["error"][:5]:
-                lines.append(f"  • <code>{n}</code>: {r}")
-
-        buttons = []
-        if health["unauthorized"] or health["error"]:
-            buttons.append([InlineKeyboardButton(
-                "🗑 حذف sessionهای غیرفعال",
-                callback_data="mobin_purge_bad",
-            )])
-        buttons.append([InlineKeyboardButton(
-            "🔙 بازگشت به پنل", callback_data="mobin_back")])
-
-        try:
-            await status_msg.edit_text(
-                "\n".join(lines),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-        except Exception:
-            await q.message.reply_text(
-                "\n".join(lines),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-        return MOBIN_ROOT
-
-    # =====================================================
-    # 🗑 حذف sessionهای غیرفعال
-    # =====================================================
-    if data == "mobin_purge_bad":
-        status_msg = await q.message.reply_text("⏳ در حال شناسایی sessionهای غیرفعال...")
-        health = await check_all_sessions_health()
-
-        to_remove = set(health["unauthorized"]) | {n for n, _ in health["error"]}
-        removed = 0
-        for name in to_remove:
-            if delete_session(name):
-                removed += 1
-
-        if removed:
-            _schedule_backup_upload()
-
-        try:
-            await status_msg.edit_text(
-                f"🗑 {removed} session غیرفعال حذف شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
-                ]),
-            )
-        except Exception:
-            await q.message.reply_text(
-                f"🗑 {removed} session غیرفعال حذف شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
-                ]),
-            )
-        return MOBIN_ROOT
-
-    # =====================================================
-    # 🗑 حذف sessionهای تکراری
-    # =====================================================
-    if data == "mobin_dedup":
-        before = len(list_sessions())
-        if before == 0:
-            await q.message.reply_text(
-                "⚠️ هیچ سشنی موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
-                ]),
-            )
-            return MOBIN_ROOT
-
-        status_msg = await q.message.reply_text(
-            f"🔍 در حال بررسی {before} session برای تکراری..."
-        )
-
-        dedup_res = dedup_sessions_on_disk()
-        after = len(list_sessions())
-
-        lines = [f"🗑 <b>نتیجه حذف sessionهای تکراری</b>\n"]
-        lines.append(f"📊 قبل: {before}")
-        lines.append(f"🗑 حذف شد: {len(dedup_res['removed'])}")
-        lines.append(f"✅ باقی‌مانده: {after}")
-
-        if dedup_res["removed"]:
-            lines.append("\n<b>حذف‌شده‌ها:</b>")
-            for n in dedup_res["removed"][:15]:
-                lines.append(f"  • <code>{n}</code>")
-            if len(dedup_res["removed"]) > 15:
-                lines.append(f"  ... و {len(dedup_res['removed']) - 15} تای دیگر")
-            _schedule_backup_upload()
-        else:
-            lines.append("\n✅ هیچ session تکراری پیدا نشد.")
-
-        try:
-            await status_msg.edit_text(
-                "\n".join(lines),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
-                ]),
-            )
-        except Exception:
-            await q.message.reply_text(
-                "\n".join(lines),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="mobin_back")]
-                ]),
-            )
-        return MOBIN_ROOT
-
-    # =====================================================
-    # بقیه کال‌بک‌ها
-    # =====================================================
     if data == "mobin_reaction":
         sessions = list_sessions()
         if not sessions:
@@ -1054,7 +828,7 @@ async def mobin_cb(update: Update, context):
 
     return MOBIN_ROOT
 
-# ---------- هدف ری‌اکشن ----------
+# ---------- هدف ری‌اکشن: لینک یا فوروارد ----------
 async def mobin_rx_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
@@ -1068,15 +842,13 @@ async def mobin_rx_target(update: Update, context):
         context.user_data["mobin_forward_info"] = fwd
         context.user_data["mobin_rx_peer"] = None
         context.user_data["mobin_rx_msg_id"] = 0
-
-        emojis = await _get_available_reactions(forward_info=fwd)
+        emojis = await _get_channel_reactions(forward_info=fwd)
         if not emojis:
             await msg.reply_text(
                 "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
                 reply_markup=_cancel_kb(),
             )
             return MOBIN_REACTION_WAITING_TARGET
-
         await msg.reply_text(
             f"🎭 ایموجی ری‌اکشن را انتخاب کنید ({len(emojis)} مورد مجاز):",
             reply_markup=_emoji_kb(emojis),
@@ -1097,7 +869,7 @@ async def mobin_rx_target(update: Update, context):
     context.user_data["mobin_rx_msg_id"] = msg_id
     context.user_data["mobin_forward_info"] = None
 
-    emojis = await _get_available_reactions(peer_str=peer)
+    emojis = await _get_channel_reactions(peer_str=peer)
     if not emojis:
         await msg.reply_text(
             "⚠️ این کانال هیچ ری‌اکشنی مجاز نکرده است.",
@@ -1111,7 +883,7 @@ async def mobin_rx_target(update: Update, context):
     )
     return MOBIN_REACTION_WAITING_EMOJI
 
-# ---------- برداشتن ری‌اکشن ----------
+# ---------- برداشتن ری‌اکشن: هدف ----------
 async def mobin_remove_target(update: Update, context):
     msg = update.message
     text = (msg.text or "").strip()
@@ -1239,15 +1011,11 @@ async def mobin_import_zip(update: Update, context):
                     f.write(zf.read("mobin.json"))
 
         result = import_sessions_zip(raw_bytes)
-        dedup_res = dedup_sessions_on_disk()
         _schedule_backup_upload()
         n = len(list_sessions())
         report = _format_import_report(result)
-        extra = ""
-        if dedup_res["removed"]:
-            extra = f"\n\n🧹 dedup: {len(dedup_res['removed'])} تکراری حذف شد."
         await update.message.reply_text(
-            f"✅ بکاپ پردازش شد — {n} سشن فعال.\n\n{report}{extra}",
+            f"✅ بکاپ پردازش شد — {n} سشن فعال.\n\n{report}",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
@@ -1270,13 +1038,11 @@ async def mobin_add_sessions_zip(update: Update, context):
     status = await update.message.reply_text("⏳ در حال پردازش ZIP...")
 
     result = import_sessions_zip(raw_bytes)
-    dedup_res = dedup_sessions_on_disk()
 
     if (not result["imported"]
             and not result["skipped_existing"]
             and not result["skipped_duplicate_in_zip"]
-            and not result["errors"]
-            and not dedup_res["removed"]):
+            and not result["errors"]):
         try:
             await status.edit_text(
                 "❌ هیچ فایل <code>.session</code> در ZIP پیدا نشد.",
@@ -1293,19 +1059,16 @@ async def mobin_add_sessions_zip(update: Update, context):
     _schedule_backup_upload()
     total = len(list_sessions())
     report = _format_import_report(result)
-    extra = ""
-    if dedup_res["removed"]:
-        extra = f"\n\n🧹 dedup: {len(dedup_res['removed'])} تکراری حذف شد."
 
     try:
         await status.edit_text(
-            f"📊 مجموع: {total} سشن\n\n{report}{extra}",
+            f"📊 مجموع: {total} سشن\n\n{report}",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
     except Exception:
         await update.message.reply_text(
-            f"📊 مجموع: {total} سشن\n\n{report}{extra}",
+            f"📊 مجموع: {total} سشن\n\n{report}",
             parse_mode="HTML",
             reply_markup=_main_kb(),
         )
