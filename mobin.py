@@ -1458,6 +1458,7 @@ async def _start_remove_scan(update, context, peer, msg_id, forward_info):
 
 
 # ---------- اجرا ----------
+# ---------- اجرا ----------
 async def mobin_rx_count(update: Update, context):
     text = (update.message.text or "").strip()
     if not text.isdigit() or int(text) <= 0:
@@ -1480,9 +1481,13 @@ async def mobin_rx_count(update: Update, context):
 
     is_remove = emoji is None
 
-    # مقادیر پیش‌فرض
     keep_emojis_per_session: dict[str, list[str]] | None = None
     emoji_to_send: str | None = emoji
+
+    # ===== شمارنده‌ها برای گزارش =====
+    used_no_reaction = 0
+    used_unknown = 0
+    used_with_reaction = 0
 
     if is_remove:
         sessions_with_reaction = [s for s, _ in scan.get("with_reaction", [])]
@@ -1496,7 +1501,6 @@ async def mobin_rx_count(update: Update, context):
 
         if remove_emoji != "__NOT_SET__" and remove_emoji is not None:
             target_emoji = remove_emoji
-            # ساخت نقشه: هر سشن → ایموجی‌های باقی‌مانده
             keep_map: dict[str, list[str]] = {}
             for s, emojis in scan.get("with_reaction", []):
                 if target_emoji in emojis:
@@ -1513,15 +1517,39 @@ async def mobin_rx_count(update: Update, context):
             keep_emojis_per_session = keep_map
             emoji_to_send = None
             action_label = f"حذف ری‌اکشن {target_emoji} (حفظ بقیه)"
+            used_with_reaction = len(selected)
         else:
             selected = sessions_with_reaction[:requested]
             emoji_to_send = None
             action_label = "حذف همه ری‌اکشن‌ها"
+            used_with_reaction = len(selected)
     else:
-        no_reaction_sessions = list(scan.get("no_reaction", []))
-        unknown_count = len(scan.get("unknown", []))
-        selected = no_reaction_sessions[:requested]
-        used_fallback = requested > len(selected)
+        # ===== حالت زدن ری‌اکشن — اولویت‌بندی هوشمند =====
+        no_reaction_list = list(scan.get("no_reaction", []))
+        unknown_list = [s for s, _ in scan.get("unknown", [])]
+        with_reaction_list = [s for s, _ in scan.get("with_reaction", [])]
+
+        selected: list[str] = []
+
+        # اولویت ۱: سشن‌های آزاد تأییدشده
+        take = no_reaction_list[:requested]
+        selected.extend(take)
+        used_no_reaction = len(take)
+
+        # اولویت ۲: اگر کم آمد، از unknown
+        if len(selected) < requested:
+            need = requested - len(selected)
+            take = unknown_list[:need]
+            selected.extend(take)
+            used_unknown = len(take)
+
+        # اولویت ۳: اگر باز هم کم آمد، از with_reaction (جایگزینی می‌شود، ری‌اکشن تکراری نمی‌شود)
+        if len(selected) < requested:
+            need = requested - len(selected)
+            take = with_reaction_list[:need]
+            selected.extend(take)
+            used_with_reaction = len(take)
+
         emoji_to_send = emoji
         action_label = f"ری‌اکشن {emoji}"
 
@@ -1562,17 +1590,25 @@ async def mobin_rx_count(update: Update, context):
         if i + MAX_PARALLEL_ACTIONS < len(selected):
             await asyncio.sleep(random.uniform(3, 7))
 
+    # ===== گزارش نهایی =====
     lines = [f"✅ موفق: {ok_total}/{actual_count}"]
 
     if is_remove:
         lines.append(f"\n🗑 عملیات: {action_label}")
     else:
-        no_count = len(scan.get("no_reaction", []))
-        lines.append(f"\n🔋 از سشن‌های آزاد استفاده شد: {len(selected)} (از {no_count} آزاد)")
-        if used_fallback:
+        lines.append("\n🔋 <b>ترکیب سشن‌های استفاده‌شده:</b>")
+        if used_no_reaction:
+            lines.append(f"  • 🟢 {used_no_reaction} سشن آزاد (بدون ری‌اکشن)")
+        if used_unknown:
+            lines.append(f"  • 🟡 {used_unknown} سشن نامشخص")
+        if used_with_reaction:
+            lines.append(f"  • 🔴 {used_with_reaction} سشن ری‌اکشن‌دار (ایموجی قبلی جایگزین شد)")
+
+        # هشدار در صورت استفاده از fallback
+        if used_unknown or used_with_reaction:
             lines.append(
-                f"⚠️ درخواست {requested} بود ولی فقط {len(selected)} سشن آزاد تأییدشده موجود بود.\n"
-                f"   (سشن‌های نامشخص یا ری‌اکشن‌دار برای جلوگیری از تکرار استفاده نشدند.)"
+                "\n<i>⚠️ چون تعداد سشن آزاد کافی نبود، از سشن‌های دیگر هم استفاده شد. "
+                "در این سشن‌ها ایموجی قبلی با ایموجی جدید جایگزین می‌شود و ری‌اکشن تکراری ثبت نمی‌شود.</i>"
             )
 
     if failed:
@@ -1588,7 +1624,6 @@ async def mobin_rx_count(update: Update, context):
     _clear_mobin_user_data(context, keep_auth=True)
     await _send_main_menu(update, context, "🎛 <b>پنل مبین</b>")
     return MOBIN_ROOT
-
 
 # ---------- تغییر رمز ----------
 async def mobin_new_password(update: Update, context):
