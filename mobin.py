@@ -208,6 +208,39 @@ async def _session_user_id(session_name: str) -> int | None:
             pass
 
 
+async def _session_user_info(session_name: str) -> dict | None:
+    """اطلاعات کامل: user_id، phone، first_name"""
+    data = load_mobin_data()
+    api_id = data.get("api_id", 2040)
+    api_hash = data.get("api_hash", "b18441a1ff607e10a989891a5462e627")
+    sess_path = os.path.join(MOBIN_SESSIONS_DIR, f"{session_name}.session")
+    if not os.path.exists(sess_path):
+        return None
+
+    client = TelegramClient(sess_path, api_id, api_hash)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return None
+        me = await client.get_me()
+        if me is None:
+            return None
+        return {
+            "user_id": int(me.id),
+            "phone": getattr(me, "phone", None) or "—",
+            "first_name": getattr(me, "first_name", None) or "",
+            "username": getattr(me, "username", None) or "",
+        }
+    except Exception as e:
+        mobin_logger.debug(f"_session_user_info({session_name}) failed: {e}")
+        return None
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 async def _cleanup_and_validate_sessions(progress_cb=None) -> dict:
     sessions = list_sessions()
     total = len(sessions)
@@ -1054,22 +1087,79 @@ async def _background_delayed_runner(
     ok_total = 0
     failed = []
 
+    # شمارنده زنده
+    task_info = _bg_tasks.get(task_id, {})
+    progress = task_info.get("progress") or {"done": 0, "ok": 0, "failed": 0}
+    lock = asyncio.Lock()  # برای آپدیت امن progress
+
+    async def _update_progress_ui():
+        try:
+            tinfo = _bg_tasks.get(task_id)
+            if not tinfo:
+                return
+            p = tinfo.get("progress") or {}
+            d = p.get("done", 0)
+            o = p.get("ok", 0)
+            f = p.get("failed", 0)
+            if cancel_event.is_set():
+                head = "🛑 <b>در حال لغو...</b>"
+            else:
+                head = "🚀 <b>عملیات تاخیری در حال اجرا</b>"
+            await status_msg.edit_text(
+                f"{head}\n"
+                f"📊 پیشرفت: <b>{d}/{actual_count}</b> (✅ {o} | ❌ {f})\n"
+                f"⏱ زمان کل: <b>{delay_seconds:g}</b> ثانیه\n"
+                f"🎯 عملیات: <b>{action_label}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🛑 لغو این عملیات",
+                        callback_data=f"mobin_cancel_bg_{task_id}")],
+                    [InlineKeyboardButton(
+                        "🔍 جزئیات",
+                        callback_data=f"mobin_bg_detail_{task_id}")],
+                ]),
+            )
+        except Exception:
+            pass
+
     async def _run_delayed_single(session_name, emj, keep, delay_before):
         try:
             if delay_before > 0:
                 await asyncio.wait_for(cancel_event.wait(), timeout=delay_before)
+                async with lock:
+                    progress["done"] += 1
+                    progress["failed"] += 1
+                asyncio.create_task(_update_progress_ui())
                 return {"ok": False, "reason": "لغو شده توسط کاربر"}
         except asyncio.TimeoutError:
             pass
 
         if cancel_event.is_set():
+            async with lock:
+                progress["done"] += 1
+                progress["failed"] += 1
+            asyncio.create_task(_update_progress_ui())
             return {"ok": False, "reason": "لغو شده توسط کاربر"}
 
-        if keep is not None:
-            return await _react_one_session(
-                session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
-            )
-        return await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
+        try:
+            if keep is not None:
+                r = await _react_one_session(
+                    session_name, peer, msg_id, None, fwd_info, keep_emojis=keep
+                )
+            else:
+                r = await _react_one_session(session_name, peer, msg_id, emj, fwd_info)
+        except Exception as e:
+            r = {"ok": False, "reason": str(e)}
+
+        async with lock:
+            progress["done"] += 1
+            if isinstance(r, dict) and r.get("ok"):
+                progress["ok"] += 1
+            else:
+                progress["failed"] += 1
+        asyncio.create_task(_update_progress_ui())
+        return r
 
     coros = [
         _run_delayed_single(s, emj, keep, d)
@@ -1088,6 +1178,7 @@ async def _background_delayed_runner(
     elapsed = time.time() - start_time
     was_cancelled = cancel_event.is_set()
 
+    # پست نهایی
     title = "🛑 <b>عملیات تاخیری لغو شد</b>" if was_cancelled else "✅ <b>پایان عملیات تاخیری</b>"
     lines = [
         title,
@@ -1419,14 +1510,110 @@ async def mobin_cb(update: Update, context):
         for tid, tinfo in list(_bg_tasks.items()):
             label = tinfo.get("label", "ری‌اکشن")
             count = tinfo.get("count", 0)
+            p = tinfo.get("progress") or {}
+            done = p.get("done", 0)
+            ok = p.get("ok", 0)
+            started = tinfo.get("started_at", 0)
+            elapsed_live = int(time.time() - started) if started else 0
             lines.append(
-                f"• <b>{label}</b> روی {count} سشن (کد: <code>{tid[-4:]}</code>)")
-            kb.append([InlineKeyboardButton(
-                f"🛑 لغو: {label} ({tid[-4:]})", callback_data=f"mobin_cancel_bg_{tid}")])
+                f"\n• <b>{label}</b>\n"
+                f"  📊 {done}/{count} | ✅ {ok} | ⏳ {elapsed_live}s\n"
+                f"  کد: <code>{tid[-4:]}</code>"
+            )
+            kb.append([
+                InlineKeyboardButton(
+                    f"🔍 جزئیات {tid[-4:]}",
+                    callback_data=f"mobin_bg_detail_{tid}"
+                ),
+                InlineKeyboardButton(
+                    f"🛑 لغو {tid[-4:]}",
+                    callback_data=f"mobin_cancel_bg_{tid}"
+                ),
+            ])
 
         kb.append([InlineKeyboardButton(
             "🔙 بازگشت به پنل", callback_data="mobin_back")])
-        await q.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb))
+        try:
+            await q.message.edit_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(kb),
+            )
+        except Exception:
+            pass
+        return MOBIN_ROOT
+
+    if data.startswith("mobin_bg_detail_"):
+        task_id = data[len("mobin_bg_detail_"):]
+        tinfo = _bg_tasks.get(task_id)
+        if not tinfo:
+            await q.answer("⚠️ این عملیات پایان یافته است.", show_alert=True)
+            return MOBIN_ROOT
+
+        # ساخت لینک پست
+        peer_info = tinfo.get("peer")
+        fwd_info = tinfo.get("fwd_info")
+        mid = tinfo.get("msg_id")
+
+        link = "—"
+        if fwd_info and fwd_info.get("chat_id"):
+            chat_id = str(fwd_info["chat_id"])
+            if chat_id.startswith("-100"):
+                link = f"https://t.me/c/{chat_id[4:]}/{fwd_info['message_id']}"
+            else:
+                link = f"<code>{chat_id}/{fwd_info['message_id']}</code>"
+        elif peer_info and mid:
+            if isinstance(peer_info, str):
+                link = f"https://t.me/{peer_info}/{mid}"
+            elif isinstance(peer_info, int):
+                if str(peer_info).startswith("-100"):
+                    link = f"https://t.me/c/{str(peer_info)[4:]}/{mid}"
+                else:
+                    link = f"<code>{peer_info}/{mid}</code>"
+
+        emoji_info = "—"
+        if tinfo.get("is_remove"):
+            tgt = tinfo.get("target_emoji")
+            if tgt is None:
+                emoji_info = "حذف همه ری‌اکشن‌ها"
+            else:
+                emoji_info = f"حذف {tgt} (حفظ بقیه)"
+        else:
+            if tinfo.get("emoji"):
+                emoji_info = tinfo["emoji"]
+
+        p = tinfo.get("progress") or {}
+        done = p.get("done", 0)
+        ok = p.get("ok", 0)
+        fail = p.get("failed", 0)
+        total = tinfo.get("count", 0)
+        started = tinfo.get("started_at", 0)
+        elapsed_live = int(time.time() - started) if started else 0
+
+        lines = [
+            "🔍 <b>جزئیات عملیات در حال اجرا</b>\n",
+            f"🎯 عملیات: <b>{tinfo.get('label')}</b>",
+            f"🎭 ایموجی/نوع: <b>{emoji_info}</b>",
+            f"🔗 لینک پست: {link}",
+            f"📊 پیشرفت: <b>{done}/{total}</b>",
+            f"  • ✅ موفق: <b>{ok}</b>",
+            f"  • ❌ ناموفق/متوقف: <b>{fail}</b>",
+            f"⏱ زمان کل تنظیم: <b>{tinfo.get('delay_seconds', 0):g}</b> ثانیه",
+            f"⏳ گذشته تا الان: <b>{elapsed_live}</b> ثانیه",
+        ]
+
+        await q.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🛑 لغو این عملیات",
+                    callback_data=f"mobin_cancel_bg_{task_id}")],
+                [InlineKeyboardButton(
+                    "🔙 بازگشت به لیست",
+                    callback_data="mobin_list_bg_tasks")],
+            ]),
+        )
         return MOBIN_ROOT
 
     if data == "mobin_close":
@@ -1590,23 +1777,77 @@ async def mobin_cb(update: Update, context):
             return MOBIN_ROOT
 
         await q.message.edit_text(
-            f"⏳ در حال خواندن user_id سشن‌ها ({len(names)})...",
+            f"⏳ در حال خواندن اطلاعات {len(names)} سشن (شماره تلفن، user_id)...",
             parse_mode="HTML",
         )
-        lines = [f"🗂 <b>سشن‌های فعال ({len(names)})</b>\n"]
-        for name in names[:30]:
-            uid = await _session_user_id(name)
-            uid_str = str(uid) if uid else "نامعتبر/غیرمجاز"
-            lines.append(
-                f"• <code>{name}</code> — user_id: <code>{uid_str}</code>")
-        if len(names) > 30:
-            lines.append(f"\n... و {len(names) - 30} تای دیگر")
 
-        await q.message.edit_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=_sessions_kb(),
+        # دریافت اطلاعات کامل هر سشن با محدودیت همزمانی
+        sem = asyncio.Semaphore(5)
+
+        async def _one(name):
+            async with sem:
+                return name, await _session_user_info(name)
+
+        results = await asyncio.gather(
+            *[_one(n) for n in names[:50]],  # حداکثر 50 سشن اول
+            return_exceptions=True,
         )
+
+        info_map: dict[str, dict | None] = {}
+        for r in results:
+            if isinstance(r, tuple) and len(r) == 2:
+                info_map[r[0]] = r[1]
+
+        lines = [f"🗂 <b>سشن‌های فعال ({len(names)})</b>\n"]
+        display_count = 0
+        for name in names[:50]:
+            info = info_map.get(name)
+            if info:
+                uid_str = str(info["user_id"])
+                phone = info["phone"]
+                fn = info["first_name"] or ""
+                un = info["username"]
+                un_str = f"@{un}" if un else ""
+                extra = " ".join(x for x in (fn, un_str) if x)
+                if extra:
+                    lines.append(
+                        f"• <code>{name}</code>\n"
+                        f"  📱 <code>{phone}</code> | 🆔 <code>{uid_str}</code>\n"
+                        f"  👤 {extra}"
+                    )
+                else:
+                    lines.append(
+                        f"• <code>{name}</code>\n"
+                        f"  📱 <code>{phone}</code> | 🆔 <code>{uid_str}</code>"
+                    )
+            else:
+                lines.append(
+                    f"• <code>{name}</code>\n"
+                    f"  ⚠️ نامعتبر/غیرمجاز"
+                )
+            display_count += 1
+
+        if len(names) > display_count:
+            lines.append(f"\n... و {len(names) - display_count} تای دیگر")
+
+        # پیام ممکن است خیلی بلند شود؛ اگر از ۴۰۰۰ کاراکتر گذشت، خلاصه کن
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3900] + "\n... (خلاصه شده به دلیل حجم زیاد)"
+
+        try:
+            await q.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_sessions_kb(),
+            )
+        except Exception:
+            await q.message.edit_text(
+                f"🗂 <b>سشن‌های فعال ({len(names)})</b>\n\n"
+                f"لیست به دلیل حجم زیاد قابل نمایش نیست. اما همه سشن‌ها سالم هستند.",
+                parse_mode="HTML",
+                reply_markup=_sessions_kb(),
+            )
         return MOBIN_SESSIONS_MANAGER
 
     if data == "mobin_del_all_sessions":
@@ -2023,6 +2264,17 @@ async def mobin_rx_count(update: Update, context):
             "status_msg": status_msg,
             "label": action_label,
             "count": actual_count,
+            # ↓↓↓ اطلاعات جدید
+            "peer": peer,
+            "msg_id": msg_id,
+            "fwd_info": fwd_info,
+            "emoji": emoji_to_send,
+            "keep_emojis": keep_emojis_per_session,
+            "is_remove": is_remove,
+            "target_emoji": remove_emoji if remove_emoji != "__NOT_SET__" else None,
+            "started_at": time.time(),
+            "delay_seconds": delay_seconds,
+            "progress": {"done": 0, "ok": 0, "failed": 0},  # ← شمارنده زنده
         }
 
         _clear_mobin_user_data(context)
