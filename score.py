@@ -784,7 +784,7 @@ def normalize_national_id(value):
 
     # پیدا کردن عدد دقیقاً 10 رقمی
     match = re.search(
-        r"(?<!\d)(\d{16})(?!\d)",
+        r"(?<!\d)(\d{10})(?!\d)",
         cleaned
     )
 
