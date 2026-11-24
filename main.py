@@ -7014,9 +7014,19 @@ async def health(request):
 
 async def webhook_handler(request):
     app = request.app["tg"]
+
     data = await request.json()
     update = Update.de_json(data, app.bot)
+
+    # سکوت کامل در گروه‌ها و سوپرگروه‌ها
+    chat = update.effective_chat
+
+    if chat and chat.type in ("group", "supergroup"):
+        return web.Response(text="OK")
+
+    # پردازش عادی آپدیت‌های پیوی
     await app.process_update(update)
+
     return web.Response(text="OK")
 
 # ===👆🏻=== COMMEN CODE FOR BABIES/FATHER ===☝🏻=== COMMEN CODE FOR BABIES/FATHER =======  ===👆🏻=== COMMEN CODE FOR BABIES/FATHER ===☝🏻=== COMMEN CODE FOR BABIES/FATHER =======
