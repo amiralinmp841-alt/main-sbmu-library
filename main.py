@@ -100,6 +100,7 @@ from score import (
     handle_score_excel_state,
     receive_score_backup,
     receive_national_id,
+    receive_score_group_id,
     handle_score_deeplink,
 )
 from game import game_start, build_game_handler
@@ -199,7 +200,8 @@ logging.basicConfig(
     SCORE_WAITING_DELETE,
     SCORE_WAITING_BACKUP,
     SCORE_WAITING_NATIONAL_ID,
-) = range(23)
+    SCORE_WAITING_GROUP_ID,
+) = range(24)
 
 # ============ TELEGRAM USER API BACKUP CONFIG ============
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -581,6 +583,7 @@ configure_score_system(
     score_waiting_delete_state=SCORE_WAITING_DELETE,
     score_waiting_backup_state=SCORE_WAITING_BACKUP,
     score_waiting_national_id_state=SCORE_WAITING_NATIONAL_ID,
+    score_waiting_group_id_state=SCORE_WAITING_GROUP_ID,
 
     upload_file_to_telegram=upload_file_to_telegram,
     download_latest_file_from_telegram=download_latest_file_from_telegram,
@@ -6984,6 +6987,15 @@ def build_application():
                 ),
             
             ],
+
+            SCORE_WAITING_GROUP_ID: [
+
+                MessageHandler(
+                    filters.TEXT & (~filters.COMMAND),
+                    receive_score_group_id
+                ),
+
+            ],
         },
 
         fallbacks=[
@@ -7014,19 +7026,17 @@ async def health(request):
 
 async def webhook_handler(request):
     app = request.app["tg"]
-
     data = await request.json()
     update = Update.de_json(data, app.bot)
 
-    # سکوت کامل در گروه‌ها و سوپرگروه‌ها
+    # سکوت کامل ربات در گروه‌ها و سوپرگروه‌ها:
+    # هیچ هندلری برای آپدیت‌های گروه اجرا نمی‌شود.
     chat = update.effective_chat
-
     if chat and chat.type in ("group", "supergroup"):
         return web.Response(text="OK")
 
-    # پردازش عادی آپدیت‌های پیوی
+    # پردازش عادی آپدیت‌ها در پیوی و سایر چت‌های مجاز
     await app.process_update(update)
-
     return web.Response(text="OK")
 
 # ===👆🏻=== COMMEN CODE FOR BABIES/FATHER ===☝🏻=== COMMEN CODE FOR BABIES/FATHER =======  ===👆🏻=== COMMEN CODE FOR BABIES/FATHER ===☝🏻=== COMMEN CODE FOR BABIES/FATHER =======
