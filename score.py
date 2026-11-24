@@ -46,6 +46,7 @@ SCORE_WAITING_EXCEL = None
 SCORE_WAITING_DELETE = None
 SCORE_WAITING_BACKUP = None
 SCORE_WAITING_NATIONAL_ID = None
+SCORE_WAITING_GROUP_ID = None
 
 
 # =========================================================
@@ -64,6 +65,7 @@ def configure_score_system(
     score_waiting_delete_state,
     score_waiting_backup_state,
     score_waiting_national_id_state,
+    score_waiting_group_id_state,
     upload_file_to_telegram,
     download_latest_file_from_telegram,
     get_admin_ids,
@@ -78,6 +80,7 @@ def configure_score_system(
     global SCORE_WAITING_DELETE
     global SCORE_WAITING_BACKUP
     global SCORE_WAITING_NATIONAL_ID
+    global SCORE_WAITING_GROUP_ID
 
     global _upload_file_to_telegram
     global _download_latest_file_from_telegram
@@ -88,6 +91,7 @@ def configure_score_system(
     SCORE_WAITING_DELETE = score_waiting_delete_state
     SCORE_WAITING_BACKUP = score_waiting_backup_state
     SCORE_WAITING_NATIONAL_ID = score_waiting_national_id_state
+    SCORE_WAITING_GROUP_ID = score_waiting_group_id_state
 
     _upload_file_to_telegram = upload_file_to_telegram
     _download_latest_file_from_telegram = download_latest_file_from_telegram
@@ -632,6 +636,8 @@ async def score_callback_handler(
                 f"{number}. <b>{course_name}</b>\n"
                 f"👥 تعداد رکورد: "
                 f"<code>{student_count}</code>\n"
+                f"🆔 آیدی گروه: <code>{course.get('group_id', 'ثبت نشده')}</code>\n"
+                f"👤 تعداد دفعات استفاده: <code>{len(course.get('viewed_by', {}))}</code>\n"
                 f"🔗 دیپ‌لینک:\n"
                 f"<code>{deep_link}</code>\n\n"
             )
@@ -1019,92 +1025,155 @@ async def receive_score_course_name(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-    course_name = (
-        update.message.text
-        or ""
-    ).strip()
+    course_name = (update.message.text or "").strip()
 
     if not course_name:
-
-        await update.message.reply_text(
-            "❌ نام درس نمی‌تواند خالی باشد."
-        )
-
+        await update.message.reply_text("❌ نام درس نمی‌تواند خالی باشد.")
         return SCORE_WAITING_EXCEL
 
-    pending = context.user_data.get(
-        "score_pending_excel"
-    )
-
+    pending = context.user_data.get("score_pending_excel")
     if not pending:
-
         await update.message.reply_text(
             "❌ اطلاعات فایل اکسل پیدا نشد.\n"
             "لطفاً دوباره فایل اکسل را ارسال کنید."
         )
-
-        context.user_data.pop(
-            "score_mode",
-            None
-        )
-
+        context.user_data.pop("score_mode", None)
         return SCORE_ROOT
 
     data = load_scores()
-
-    # بررسی تکراری بودن نام
     for course in data["courses"].values():
-
-        if (
-            course.get("name", "").strip()
-            == course_name
-        ):
-
+        if course.get("name", "").strip() == course_name:
             await update.message.reply_text(
                 "❌ درسی با این نام قبلاً ثبت شده است.\n\n"
                 "یک نام دیگر ارسال کنید."
             )
+            return SCORE_WAITING_EXCEL
 
+    context.user_data["score_pending_course_name"] = course_name
+    context.user_data["score_mode"] = "waiting_group_id"
+
+    await update.message.reply_text(
+        "✅ نام درس ثبت شد.\n\n"
+        f"📚 نام درس: <b>{course_name}</b>\n\n"
+        "حالا <b>آیدی عددی گروه تلگرام</b> مربوط به این درس را ارسال کن.\n"
+        "مثال: <code>-1001234567890</code>\n\n"
+        "ربات باید عضو همان گروه باشد؛ در غیر این صورت درس ثبت نمی‌شود.",
+        parse_mode="HTML"
+    )
+    return SCORE_WAITING_GROUP_ID
+
+
+async def receive_score_group_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    raw_group_id = (update.message.text or "").strip()
+    course_name = context.user_data.get("score_pending_course_name")
+    pending = context.user_data.get("score_pending_excel")
+
+    if not course_name or not pending:
+        await update.message.reply_text(
+            "❌ اطلاعات درس یا فایل اکسل پیدا نشد. از پنل نمرات دوباره شروع کن."
+        )
+        context.user_data.pop("score_mode", None)
+        context.user_data.pop("score_pending_course_name", None)
+        context.user_data.pop("score_pending_excel", None)
+        return SCORE_ROOT
+
+    try:
+        group_id = int(raw_group_id)
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "❌ آیدی گروه باید یک عدد صحیح باشد.\n"
+            "مثال: <code>-1001234567890</code>",
+            parse_mode="HTML"
+        )
+        return SCORE_WAITING_GROUP_ID
+
+    try:
+        group_chat = await context.bot.get_chat(group_id)
+        if group_chat.type not in ("group", "supergroup"):
+            await update.message.reply_text(
+                "❌ این آیدی مربوط به گروه یا سوپرگروه نیست.\n"
+                "آیدی عددی گروه را دوباره ارسال کن."
+            )
+            return SCORE_WAITING_GROUP_ID
+
+        bot_user = await context.bot.get_me()
+        bot_member = await context.bot.get_chat_member(
+            chat_id=group_id,
+            user_id=bot_user.id
+        )
+        bot_status = getattr(bot_member, "status", None)
+        bot_is_member = (
+            bot_status in ("member", "administrator", "creator")
+            or (bot_status == "restricted" and getattr(bot_member, "is_member", False))
+        )
+
+        if not bot_is_member:
+            await update.message.reply_text(
+                "❌ ربات عضو این گروه نیست.\n"
+                "ابتدا ربات را به گروه اضافه کن و سپس آیدی گروه را دوباره بفرست."
+            )
+            return SCORE_WAITING_GROUP_ID
+
+    except Exception as e:
+        logging.warning("Could not validate score group %s: %s", group_id, e)
+        await update.message.reply_text(
+            "❌ گروه پیدا نشد یا ربات به آن دسترسی ندارد.\n"
+            "آیدی عددی را بررسی کن و مطمئن شو ربات عضو گروه است."
+        )
+        return SCORE_WAITING_GROUP_ID
+
+    data = load_scores()
+    for course in data["courses"].values():
+        if course.get("name", "").strip() == course_name:
+            await update.message.reply_text(
+                "❌ در این فاصله درسی با همین نام ثبت شده است. نام دیگری انتخاب کن."
+            )
+            context.user_data["score_mode"] = "waiting_course_name"
             return SCORE_WAITING_EXCEL
 
     course_id = uuid.uuid4().hex
-
     token = create_course_token()
-
     data["courses"][course_id] = {
         "id": course_id,
         "name": course_name,
         "token": token,
+        "group_id": group_id,
+        "group_title": getattr(group_chat, "title", None),
         "created_at": datetime.now().isoformat(),
-        "scores": pending["scores"]
+        "scores": pending["scores"],
+        "viewed_by": {}
     }
 
-    save_scores(data)
+    saved = save_scores(data)
+    if not saved:
+        # اگر بکاپ تأیید نشد، درس جدید را از فایل محلی هم برگردان
+        # تا ثبت نیمه‌کاره و نام تکراری باقی نماند.
+        data["courses"].pop(course_id, None)
+        save_scores(data, upload=False)
+        await update.message.reply_text(
+            "⚠️ ذخیره بکاپ تلگرامی تأیید نشد؛ درس ثبت نشد.\n"
+            "لطفاً مقدار SCORE_BACKUP_CHAT_ID و دسترسی ربات به گروه بکاپ را بررسی کن و دوباره تلاش کن."
+        )
+        return SCORE_ROOT
 
-    context.user_data.pop(
-        "score_pending_excel",
-        None
-    )
-
-    context.user_data.pop(
-        "score_mode",
-        None
-    )
+    context.user_data.pop("score_pending_excel", None)
+    context.user_data.pop("score_pending_course_name", None)
+    context.user_data.pop("score_mode", None)
 
     await update.message.reply_text(
         "✅ <b>درس با موفقیت ثبت شد.</b>\n\n"
         f"📚 نام درس: <b>{course_name}</b>\n"
-        f"👥 تعداد دانشجو: "
-        f"<b>{len(pending['scores'])}</b>\n\n"
+        f"👥 تعداد دانشجو: <b>{len(pending['scores'])}</b>\n"
+        f"👥 گروه مجاز: <b>{getattr(group_chat, 'title', 'گروه ثبت‌شده')}</b>\n"
+        f"🆔 آیدی گروه: <code>{group_id}</code>\n\n"
         "🔗 <b>دیپ‌لینک آزمون:</b>\n\n"
-        f"<code>https://t.me/"
-        f"{context.bot.username}"
-        f"?start=score_{token}</code>\n\n"
-        "هر کاربر از طریق این لینک وارد "
-        "بخش دریافت نمره همین آزمون می‌شود.",
+        f"<code>https://t.me/{context.bot.username}?start=score_{token}</code>\n\n"
+        "فقط اعضای گروه تعیین‌شده می‌توانند از طریق پیوی نمره بگیرند و هر عضو برای این درس فقط یک بار می‌تواند کد ملی ارسال کند.",
         parse_mode="HTML"
     )
-
     return SCORE_ROOT
 
 
@@ -1243,24 +1312,59 @@ async def receive_score_backup(
 # USER DEEP LINK
 # =========================================================
 
+async def is_user_member_of_course_group(bot, group_id, user_id):
+    """بررسی عضویت واقعی کاربر در گروه اختصاصی درس."""
+    if not group_id:
+        return False
+
+    try:
+        member = await bot.get_chat_member(
+            chat_id=int(group_id),
+            user_id=int(user_id)
+        )
+        status = getattr(member, "status", None)
+        return (
+            status in ("member", "administrator", "creator")
+            or (status == "restricted" and getattr(member, "is_member", False))
+        )
+    except Exception as e:
+        logging.info("Score group membership check failed: %s", e)
+        return False
+
+
 async def handle_score_deeplink(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     token: str
 ):
-    """
-    این تابع از داخل start اصلی صدا زده می‌شود.
-    """
-
+    """ورود کاربر به بخش نمره از طریق دیپ‌لینک."""
     course_id, course = get_course_by_token(token)
 
     if not course:
-
         await update.effective_message.reply_text(
-            "❌ این لینک دریافت نمره معتبر نیست "
-            "یا آزمون موردنظر حذف شده است."
+            "❌ این لینک دریافت نمره معتبر نیست یا آزمون موردنظر حذف شده است."
         )
+        return None
 
+    group_id = course.get("group_id")
+    if not group_id:
+        await update.effective_message.reply_text(
+            "⚠️ برای این درس هنوز گروه مجاز ثبت نشده است. مدیر باید تنظیمات درس را تکمیل کند."
+        )
+        return None
+
+    user_id = update.effective_user.id
+    viewed_by = course.setdefault("viewed_by", {})
+    if str(user_id) in viewed_by:
+        await update.effective_message.reply_text(
+            "⛔ شما قبلاً برای این درس یک کد ملی ارسال کرده‌اید و امکان ثبت کد دیگری ندارید."
+        )
+        return None
+
+    if not await is_user_member_of_course_group(context.bot, group_id, user_id):
+        await update.effective_message.reply_text(
+            "⛔ دسترسی ندارید. برای دریافت نمره این درس باید عضو گروه اختصاصی آن باشید."
+        )
         return None
 
     context.user_data["score_course_id"] = course_id
@@ -1268,98 +1372,91 @@ async def handle_score_deeplink(
 
     await update.effective_message.reply_text(
         "📊 <b>دریافت نمره امتحان</b>\n\n"
-        f"📚 آزمون / درس: <b>{course.get('name')}</b>\n\n"
-        "لطفاً <b>کد خود</b> خود را ارسال کنید.\n\n"
-        "برای برگشت به حالت عادی ربات، "
-        "دستور /start را بزنید.",
+        f"📚 درس: <b>{course.get('name')}</b>\n\n"
+        "لطفاً کد ملی موردنظر را ارسال کنید.\n"
+        "⚠️ توجه: فقط یک بار فرصت ارسال کد دارید؛ حتی اگر کد اشتباه باشد، امکان امتحان مجدد وجود ندارد.\n\n"
+        "برای برگشت به حالت عادی ربات، دستور /start را بزنید.",
         parse_mode="HTML"
     )
-
     return SCORE_WAITING_NATIONAL_ID
 
-
-# =========================================================
-# USER SENDS NATIONAL ID
-# =========================================================
 
 async def receive_national_id(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-    text = (
-        update.message.text
-        or ""
-    ).strip()
+    submitted_text = (update.message.text or "").strip()
+    national_id = normalize_national_id(submitted_text)
 
-    national_id = normalize_national_id(text)
-
-    #if not national_id:
-#
-    #    await update.message.reply_text(
-    #        "❌ لطفاً یک کد ملی معتبر ارسال کنید."
-    #    )
-#
-    #    return SCORE_WAITING_NATIONAL_ID
-
-    course_id = context.user_data.get(
-        "score_course_id"
-    )
-
+    course_id = context.user_data.get("score_course_id")
     if not course_id:
-
         await update.message.reply_text(
-            "❌ اطلاعات آزمون پیدا نشد.\n\n"
-            "لطفاً دوباره از لینک آزمون وارد شوید."
+            "❌ اطلاعات آزمون پیدا نشد. لطفاً دوباره از لینک آزمون وارد شوید."
         )
-
         return SCORE_ROOT
 
     data = load_scores()
-
-    course = data["courses"].get(
-        course_id
-    )
-
+    course = data["courses"].get(course_id)
     if not course:
-
-        await update.message.reply_text(
-            "❌ این آزمون دیگر وجود ندارد."
-        )
-
-        context.user_data.pop(
-            "score_course_id",
-            None
-        )
-
-        context.user_data.pop(
-            "score_mode",
-            None
-        )
-
+        await update.message.reply_text("❌ این آزمون دیگر وجود ندارد.")
+        context.user_data.pop("score_course_id", None)
+        context.user_data.pop("score_mode", None)
         return SCORE_ROOT
 
-    score = course.get(
-        "scores",
-        {}
-    ).get(national_id)
+    group_id = course.get("group_id")
+    if not group_id:
+        await update.message.reply_text(
+            "⚠️ برای این درس گروه مجاز ثبت نشده است. با مدیر ربات تماس بگیرید."
+        )
+        return SCORE_ROOT
+
+    user_id = update.effective_user.id
+    if not await is_user_member_of_course_group(context.bot, group_id, user_id):
+        await update.message.reply_text(
+            "⛔ عضویت شما در گروه اختصاصی این درس تأیید نشد؛ امکان مشاهده نمره ندارید."
+        )
+        return SCORE_ROOT
+
+    viewed_by = course.setdefault("viewed_by", {})
+    user_key = str(user_id)
+    if user_key in viewed_by:
+        await update.message.reply_text(
+            "⛔ شما قبلاً فرصت ارسال کد ملی این درس را استفاده کرده‌اید و امکان ثبت کد دیگری ندارید."
+        )
+        context.user_data.pop("score_course_id", None)
+        context.user_data.pop("score_mode", None)
+        return SCORE_ROOT
+
+    # اولین ارسال کد (حتی اگر اشتباه باشد) ثبت می‌شود تا امکان آزمودن کدهای مختلف وجود نداشته باشد.
+    score = course.get("scores", {}).get(national_id) if national_id else None
+    viewed_by[user_key] = {
+        "national_id": national_id or submitted_text[:64],
+        "attempted_at": datetime.now().isoformat(),
+        "found": score is not None
+    }
+
+    # ثبت محدودیت باید پیش از نمایش نمره موفق شود.
+    if not save_scores(data, upload=True):
+        await update.message.reply_text(
+            "⚠️ ثبت دائمی محدودیت استفاده تأیید نشد؛ برای جلوگیری از دور زدن محدودیت، نمره نمایش داده نشد. لطفاً با مدیر تماس بگیرید."
+        )
+        return SCORE_ROOT
+
+    context.user_data.pop("score_course_id", None)
+    context.user_data.pop("score_mode", None)
 
     if score is None:
-
         await update.message.reply_text(
-            "❌ نمره‌ای با این کد ملی پیدا نشد.\n\n"
-            "لطفاً کد ملی را دوباره بررسی کنید."
+            "❌ برای کدی که ارسال کردید نمره‌ای در فایل این درس پیدا نشد.\n\n"
+            "با توجه به محدودیت این درس، امکان ارسال کد دیگری وجود ندارد. در صورت اشتباه، با مدیر ربات تماس بگیرید."
         )
-
-        return SCORE_WAITING_NATIONAL_ID
+        return SCORE_ROOT
 
     await update.message.reply_text(
-        "🎉 <b>نمره شما پیدا شد</b>\n\n"
+        "🎉 <b>نمره پیدا شد</b>\n\n"
         f"📚 درس: <b>{course.get('name')}</b>\n"
         f"📝 نمره: <b>{score}</b>\n\n"
-        "برای دریافت نمره دوباره، کد ملی دیگری بفرستید.\n\n"
-        "برای برگشت به حالت عادی ربات، "
-        "دستور /start را بزنید.",
+        "این امکان برای شما در این درس استفاده شده است.",
         parse_mode="HTML"
     )
-
-    return SCORE_WAITING_NATIONAL_ID
+    return SCORE_ROOT
